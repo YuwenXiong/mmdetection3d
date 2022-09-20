@@ -1,7 +1,7 @@
 # model settings
 _base_ = './hv_pointpillars_secfpn_6x8_160e_kitti-3d-3class.py'
 
-point_cloud_range = [0, -39.68, -3, 69.12, 39.68, 1]
+point_cloud_range = [0, -39.68, -3.1, 69.12, 39.68, 1.1]
 model = dict(
     bbox_head=dict(
         type='Anchor3DHead',
@@ -85,3 +85,7 @@ data = dict(
         dataset=dict(pipeline=train_pipeline, classes=class_names)),
     val=dict(pipeline=test_pipeline, classes=class_names),
     test=dict(pipeline=test_pipeline, classes=class_names))
+
+find_unused_parameters = True
+work_dir='work_dirs/hv_pointpillars_secfpn_6x8_160e_kitti-3d-car-35ch-vqvae'
+cudnn_benchmark = False

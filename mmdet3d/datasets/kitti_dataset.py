@@ -320,6 +320,7 @@ class KittiDataset(Custom3DDataset):
             result_files = self.bbox2result_kitti(outputs, self.CLASSES,
                                                   pklfile_prefix,
                                                   submission_prefix)
+        # import ipdb; ipdb.set_trace()
         return result_files, tmp_dir
 
     def evaluate(self,
@@ -355,7 +356,7 @@ class KittiDataset(Custom3DDataset):
         Returns:
             dict[str, float]: Results of each evaluation metric.
         """
-        result_files, tmp_dir = self.format_results(results, pklfile_prefix)
+        result_files, tmp_dir = self.format_results(results, pklfile_prefix, submission_prefix)
         from mmdet3d.core.evaluation import kitti_eval
         gt_annos = [info['annos'] for info in self.data_infos]
 
@@ -446,6 +447,10 @@ class KittiDataset(Custom3DDataset):
                         label_preds):
                     bbox[2:] = np.minimum(bbox[2:], image_shape[::-1])
                     bbox[:2] = np.maximum(bbox[:2], [0, 0])
+                    # bbox[1] = 0
+                    # bbox[3] = 50
+                    # box[1] = -1000
+                    # box[4] = 0
                     anno['name'].append(class_names[int(label)])
                     anno['truncated'].append(0.0)
                     anno['occluded'].append(0)
@@ -681,7 +686,7 @@ class KittiDataset(Custom3DDataset):
         limit_range = box_preds.tensor.new_tensor(self.pcd_limit_range)
         valid_pcd_inds = ((box_preds.center > limit_range[:3]) &
                           (box_preds.center < limit_range[3:]))
-        valid_inds = valid_cam_inds & valid_pcd_inds.all(-1)
+        valid_inds = (valid_cam_inds & valid_pcd_inds.all(-1)) | torch.ones_like(valid_cam_inds)
 
         if valid_inds.sum() > 0:
             return dict(

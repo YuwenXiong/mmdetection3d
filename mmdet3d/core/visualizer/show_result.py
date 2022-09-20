@@ -102,7 +102,7 @@ def show_result(points,
         from .open3d_vis import Visualizer
 
         vis = Visualizer(points)
-        if pred_bboxes is not None:
+        if pred_bboxes is not None and pred_bboxes.size != 0:
             if pred_labels is None:
                 vis.add_bboxes(bbox3d=pred_bboxes)
             else:
