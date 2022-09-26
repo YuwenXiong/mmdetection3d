@@ -1204,8 +1204,9 @@ class WaabiTwoStageDETRDetector(Base3DDetector):
         self.preprocessor.load_state_dict(
             torch.load(
                 # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvae_w_two_stage_detr.pth",
+                "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-21_03-41-58_vqvae_decoder_frozen/checkpoint/vqvae.pth",
                 # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvae.pth",
-                "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/ae_baseline.pth",
+                # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/ae_baseline.pth",
                 map_location="cpu",
             ),
             strict=False,

@@ -1,40 +1,24 @@
-voxel_size = [0.15625, 0.15625, 4]
+voxel_size = [0.15625, 0.15625, 6]
 
 model = dict(
-    type="WaabiTwoStageDetector",
-    # voxel_layer=dict(
-    #     max_num_points=32,  # max_points_per_voxel
-    #     point_cloud_range=[0, -39.68, -3, 69.12, 39.68, 1],
-    #     voxel_size=voxel_size,
-    #     max_voxels=(16000, 40000),  # (training, testing) max_voxels
-    # ),
-    # voxel_encoder=dict(
-    #     type="PillarFeatureNet",
-    #     in_channels=4,
-    #     feat_channels=[64],
-    #     with_distance=False,
-    #     voxel_size=voxel_size,
-    #     point_cloud_range=[0, -39.68, -3, 69.12, 39.68, 1],
-    # ),
-    # middle_encoder=dict(type="PointPillarsScatter", in_channels=64, output_shape=[496, 432]),
-    # backbone=dict(
-    #     type="SECOND", in_channels=64, layer_nums=[3, 5, 5], layer_strides=[2, 2, 2], out_channels=[64, 128, 256]
-    # ),
+    type="VoxelNet",
+    voxel_layer=dict(
+        max_num_points=32,  # max_points_per_voxel
+        point_cloud_range=[0, -40, -2, 80, 40, 4],
+        voxel_size=voxel_size,
+        max_voxels=(32000, 40000),  # (training, testing) max_voxels
+    ),
+    voxel_encoder=dict(
+        type="PillarFeatureNet",
+        in_channels=3,
+        feat_channels=[64],
+        with_distance=False,
+        voxel_size=voxel_size,
+        point_cloud_range=[0, -40, -2, 80, 40, 4],
+    ),
+    middle_encoder=dict(type="PointPillarsScatter", in_channels=64, output_shape=[512, 512]),
     backbone=dict(
-        type="ResNet",
-        in_channels=40,
-        groups_in_stem=1,
-        stride_in_stem=2,
-        channels_in_stem=[64, 64, 64],
-        blocks_per_stage=[3, 3, 3],
-        block_type="BasicBlock",
-        # base_channels=64,
-        # specify_channels=True,
-        channels_per_stage=[96, 128, 160],
-        strides_per_stage=[2, 2, 2],
-        dilations_per_stage=[1, 1, 1],
-        out_indices=[1, 2, 3],
-        norm_type="BN",
+        type="SECOND", in_channels=40, layer_nums=[3, 5, 5], layer_strides=[2, 2, 2], out_channels=[64, 128, 256]
     ),
     neck=dict(type="SECONDFPN", in_channels=[64, 128, 256], upsample_strides=[1, 2, 4], out_channels=[128, 128, 128]),
     bbox_head=dict(
@@ -47,9 +31,9 @@ model = dict(
         anchor_generator=dict(
             type="AlignedAnchor3DRangeGenerator",
             ranges=[
-                [0, -39.68, -0.6, 69.12, 39.68, -0.6],
-                [0, -39.68, -0.6, 69.12, 39.68, -0.6],
-                [0, -39.68, -1.78, 69.12, 39.68, -1.78],
+                [0, -39.68, -0.6, 79.36, 39.68, -0.6],
+                [0, -39.68, -0.6, 79.36, 39.68, -0.6],
+                [0, -39.68, -1.78, 79.36, 39.68, -1.78],
             ],
             sizes=[[0.8, 0.6, 1.73], [1.76, 0.6, 1.73], [3.9, 1.6, 1.56]],
             rotations=[0, 1.57],
@@ -99,7 +83,7 @@ model = dict(
         nms_thr=0.01,
         score_thr=0.1,
         min_bbox_size=0,
-        nms_pre=100,
-        max_num=50,
+        nms_pre=200,
+        max_num=100,
     ),
 )

@@ -12,6 +12,8 @@ from ..builder import DETECTORS
 from .single_stage import SingleStage3DDetector
 from mmdet3d.models.detectors.vqvae import LidarVQGAN
 
+# z_offset = 0.4
+z_offset = 1.6
 
 class Voxelizer(torch.nn.Module):
     """Voxelizer for converting Lidar point cloud to image"""
@@ -180,36 +182,36 @@ class VoxelNet(SingleStage3DDetector):
         self.voxel_layer = Voxelization(**voxel_layer)
         self.voxel_encoder = builder.build_voxel_encoder(voxel_encoder)
         self.middle_encoder = builder.build_middle_encoder(middle_encoder)
-        self.voxelizer = Voxelizer(x_min=voxel_layer['point_cloud_range'][0], y_min=voxel_layer['point_cloud_range'][1], z_min=voxel_layer['point_cloud_range'][2], x_max=voxel_layer['point_cloud_range'][3], y_max=voxel_layer['point_cloud_range'][4], z_max=voxel_layer['point_cloud_range'][5], step=0.16, z_step=0.12)
+        self.voxelizer = Voxelizer(x_min=voxel_layer['point_cloud_range'][0], y_min=voxel_layer['point_cloud_range'][1], z_min=-2, x_max=voxel_layer['point_cloud_range'][3], y_max=voxel_layer['point_cloud_range'][4], z_max=4, step=0.15625, z_step=0.15)
 
         self.preprocessor = LidarVQGAN()
         self.preprocessor.load_state_dict(
             torch.load(
-                "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvae.pth",
+                "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-24_21-16-06_vqvae_sim512_zh_bottom_box_decoder_frozen/checkpoint/vqvae.pth",
                 # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/ae_baseline.pth",
                 map_location="cpu",
             ),
             strict=False,
         )
         self.preprocessor.eval()
-        for p in self.preprocessor.parameters():
-            p.requires_grad = False
+        # for p in self.preprocessor.parameters():
+        #     p.requires_grad = False
         # self.preprocessor = None
 
     def extract_feat(self, points, img_metas=None):
         """Extract features from points."""
+        for p in points:
+            p[:, 2] += z_offset
         # voxels, num_points, coors = self.voxelize(points)
         # voxel_features = self.voxel_encoder(voxels, num_points, coors)
         # batch_size = coors[-1, 0].item() + 1
         # x = self.middle_encoder(voxel_features, coors, batch_size)
-        bev = self.voxelizer([[_] for _ in points])
+        x = self.voxelizer([[_] for _ in points])
         if self.preprocessor is not None:
             with torch.no_grad():
-                # import ipdb; ipdb.set_trace()
-                bev0, bev1 = bev.chunk(2, dim=0)
-                residual = torch.cat([self.preprocessor.forward(bev0)[0], self.preprocessor.forward(bev1)[0]], dim=0)
-                x = (bev * 20 + residual).sigmoid()
-                x = (x > 0.5).float().detach()
+                residual, _ = self.preprocessor.forward(x)
+                x = (x * 20 + residual).sigmoid()
+                # x = (x > 0.5).float().detach()
 
         x = self.backbone(x)
         if self.with_neck:
@@ -258,6 +260,8 @@ class VoxelNet(SingleStage3DDetector):
         """
         x = self.extract_feat(points, img_metas)
         outs = self.bbox_head(x)
+        for box in gt_bboxes_3d:
+            box.tensor[:, 2] += z_offset
         loss_inputs = outs + (gt_bboxes_3d, gt_labels_3d, img_metas)
         losses = self.bbox_head.loss(
             *loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore)
@@ -269,6 +273,8 @@ class VoxelNet(SingleStage3DDetector):
         outs = self.bbox_head(x)
         bbox_list = self.bbox_head.get_bboxes(
             *outs, img_metas, rescale=rescale)
+        for i in range(len(bbox_list)):
+            bbox_list[i][0].tensor[:, 2] -= z_offset
         bbox_results = [
             bbox3d2result(bboxes, scores, labels)
             for bboxes, scores, labels in bbox_list

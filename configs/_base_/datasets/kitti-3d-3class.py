@@ -2,7 +2,7 @@
 dataset_type = 'KittiDataset'
 data_root = 'data/kitti/'
 class_names = ['Pedestrian', 'Cyclist', 'Car']
-point_cloud_range = [0, -40, -3, 70.4, 40, 1]
+point_cloud_range = [0, -40, -2 - 1.6, 72.5, 40, 4 - 1.6]
 input_modality = dict(use_lidar=True, use_camera=False)
 
 file_client_args = dict(backend='disk')
@@ -31,7 +31,7 @@ db_sampler = dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=4,
-        use_dim=4,
+        use_dim=3,
         file_client_args=file_client_args),
     file_client_args=file_client_args)
 
@@ -40,7 +40,7 @@ train_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=4,
-        use_dim=4,
+        use_dim=3,
         file_client_args=file_client_args),
     dict(
         type='LoadAnnotations3D',
@@ -70,7 +70,7 @@ test_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=4,
-        use_dim=4,
+        use_dim=3,
         file_client_args=file_client_args),
     dict(
         type='MultiScaleFlipAug3D',
@@ -100,7 +100,7 @@ eval_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=4,
-        use_dim=4,
+        use_dim=3,
         file_client_args=file_client_args),
     dict(
         type='DefaultFormatBundle3D',
@@ -110,7 +110,7 @@ eval_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=12,
+    samples_per_gpu=4,
     workers_per_gpu=4,
     train=dict(
         type='RepeatDataset',

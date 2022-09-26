@@ -32,7 +32,7 @@ from torchvision.ops import sigmoid_focal_loss
 
 train_sparse = True
 gumbel_sigmoid_coeff = 10
-use_vq = False
+use_vq = True
 novq_in_first2000 = True
 curriculum = False
 subsample = True
@@ -731,8 +731,8 @@ class VectorQuantizer(nn.Module):
         if self.embedding.weight.requires_grad and use_vq and self.training:
             self.update_reservoir(z_flattened.detach())
 
-        if use_vq:
-            self.update_codebook(z_flattened, force_update=self.data_initialized.item() == 0)
+        # if use_vq:
+        #     self.update_codebook(z_flattened, force_update=self.data_initialized.item() == 0)
 
         # z_flattened = LazyTensor(z_flattened[:, None, :])
         # all_zq = LazyTensor(self.embedding.weight / self.embedding.weight.norm(dim=-1, keepdim=True)[None, :, :].clamp(1e-7))
@@ -1327,7 +1327,7 @@ class VQGAN(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.in_chans = 35
+        self.in_chans = 40
         z_channels = embed_dim
         hidden_dim = 128
         self.resolution = 256

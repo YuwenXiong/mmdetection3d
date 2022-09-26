@@ -5,6 +5,7 @@ import numpy as np
 from mmdet3d.core.points import BasePoints, get_points_type
 from mmdet.datasets.pipelines import LoadAnnotations, LoadImageFromFile
 from ..builder import PIPELINES
+import pickle as pkl
 
 
 @PIPELINES.register_module()
@@ -401,6 +402,11 @@ class LoadPointsFromFile(object):
         """
         if self.file_client is None:
             self.file_client = mmcv.FileClient(**self.file_client_args)
+
+        if pts_filename.endswith('.pkl'):
+            points = pkl.load(open(pts_filename, 'rb'))
+            points = points['xyz'][points['sensor_id'] == 0]
+            return points
         try:
             pts_bytes = self.file_client.get(pts_filename)
             points = np.frombuffer(pts_bytes, dtype=np.float32)
@@ -430,6 +436,17 @@ class LoadPointsFromFile(object):
         points = points.reshape(-1, self.load_dim)
         points = points[:, self.use_dim]
         attribute_dims = None
+
+        if 'sdv_pose' in results:
+            import pandaset as ps
+            points_rfu = ps.geometry.lidar_points_to_ego(points, results['sdv_pose'])
+            # points = points_rfu
+            points =  np.concatenate([points_rfu[:, [1]], -points_rfu[:, [0]], points_rfu[:, [2]]], axis=1)
+            # import open3d as o3d
+            # pcd = o3d.geometry.PointCloud(points=o3d.utility.Vector3dVector(points))
+            # o3d.visualization.draw_geometries([pcd])
+            # import pdb; pdb.set_trace()
+
 
         if self.shift_height:
             floor_height = np.percentile(points[:, 2], 0.99)

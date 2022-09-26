@@ -750,8 +750,8 @@ class WaabiTwoStageDetector(Base3DDetector):
         self.has_heading = False
         self.has_track = False
 
-        # self.box_reg_dim = 6 if self.has_heading else 7
-        self.box_reg_dim = 6 if self.has_heading else 5
+        self.box_reg_dim = 6 if self.has_heading else 7
+        # self.box_reg_dim = 6 if self.has_heading else 5
         self.reg_dim = self.box_reg_dim + 3 * 4 if self.has_track else self.box_reg_dim
 
         # Two-stage model related hyper-parameters. Move them to config after the merged model is fixed.
@@ -773,11 +773,11 @@ class WaabiTwoStageDetector(Base3DDetector):
         n = 128  # feature dimension
 
         # Post-processing hyperparameters
-        self.conf_thresh = 0.05
+        self.conf_thresh = 0.00
         self.max_det = 100
 
         self.voxelizer = Voxelizer(
-            self.bev_range[0], self.bev_range[1], self.bev_range[2], self.bev_range[3], 0.15625, -3.5, 3.5, 0.2
+            self.bev_range[0], self.bev_range[1], self.bev_range[2], self.bev_range[3], 0.15625, -2, 4, 0.15
         )
 
         # First stage detection header
@@ -825,8 +825,10 @@ class WaabiTwoStageDetector(Base3DDetector):
         self.preprocessor = LidarVQGAN()
         self.preprocessor.load_state_dict(
             torch.load(
+                "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-24_21-16-06_vqvae_sim512_zh_bottom_box_decoder_frozen/checkpoint/vqvae.pth",
+                # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-21_03-41-58_vqvae_decoder_frozen/checkpoint/vqvae.pth",
                 # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvae.pth",
-                "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/ae_baseline.pth",
+                # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/ae_baseline.pth",
                 map_location="cpu",
             ),
             strict=False,
@@ -890,17 +892,17 @@ class WaabiTwoStageDetector(Base3DDetector):
 
         reg = self.refine["reg"](obj_feats)
         refine["logits"] = self.refine["cls"](obj_feats)
-        refine["bboxes"] = reg[:, :, :5] + rois
-        # refine["bboxes"] = torch.cat(
-        #     [
-        #         reg[:, :, :2] + rois[:, :, :2],
-        #         reg[:, :, 2:3] - 3.5,
-        #         reg[:, :, 3:5] + rois[:, :, 2:4],
-        #         reg[:, :, 5:6],
-        #         reg[:, :, 6:7] + rois[:, :, 4:5],
-        #     ],
-        #     dim=-1,
-        # )
+        # refine["bboxes"] = reg[:, :, :5] + rois
+        refine["bboxes"] = torch.cat(
+            [
+                reg[:, :, :2] + rois[:, :, :2],
+                reg[:, :, 2:3],
+                reg[:, :, 3:5] + rois[:, :, 2:4],
+                reg[:, :, 5:6],
+                reg[:, :, 6:7] + rois[:, :, 4:5],
+            ],
+            dim=-1,
+        )
         refine["rois"] = rois
 
         if self.has_heading:
@@ -952,8 +954,8 @@ class WaabiTwoStageDetector(Base3DDetector):
                     # bb[:, 2:4][mask] = 0.0000001
 
                     # keep_id = nms(torch.cat((score, bb), 1), 0.5)[:200]
-                    keep_id = nms_bev(bb, score[:, 0], 0.5, xywhr=True)[:200]
-                    # keep_id = nms_bev(bb[:, [0, 1, 3, 4, 6]], score[:, 0], 0.5, xywhr=True)[:200]
+                    # keep_id = nms_bev(bb, score[:, 0], 0.5, xywhr=True)[:200]
+                    keep_id = nms_bev(bb[:, [0, 1, 3, 4, 6]], score[:, 0], 0.5, xywhr=True)[:200]
                     if self.max_det is not None and len(keep_id) > self.max_det:
                         # Actors are already sorted by confidence, so this slicing gets the most confident post nms
                         keep_id = keep_id[: self.max_det]
@@ -971,6 +973,8 @@ class WaabiTwoStageDetector(Base3DDetector):
     def forward_model(self, points):
         assert not hasattr(self.backbone, "map_channels")
 
+        for p in points:
+            p[0][:, 2] += 1.6
         bev = self.voxelizer(points)
         if self.preprocessor is not None:
             residual, _ = self.preprocessor.forward(bev)
@@ -1006,16 +1010,16 @@ class WaabiTwoStageDetector(Base3DDetector):
 
         for i in range(len(bbox_out)):
             bboxes = torch.zeros((bbox_out[i][0].shape[0], 7))
-            # # bboxes = bbox_out[i][0][:, :-1]
-            bboxes[:, 0:2] = bbox_out[i][0][:, 0:2]
-            bboxes[:, 2] = -1
-            # # bboxes[:, 2] = bbox_out[i][0][:, 1]
-            bboxes[:, 3:5] = bbox_out[i][0][:, 2:4]
-            bboxes[:, 5] = 2.1
-            # # bboxes[:, 5] = bbox_out[i][0][:, 3]
-            bboxes[:, 6:7] = bbox_out[i][0][:, 4:5]
-            # bboxes = bbox_out[i][0][:, :-1]
-            # bboxes[:, 2] -= 0.8
+            # # # bboxes = bbox_out[i][0][:, :-1]
+            # bboxes[:, 0:2] = bbox_out[i][0][:, 0:2]
+            # bboxes[:, 2] = -1
+            # # # bboxes[:, 2] = bbox_out[i][0][:, 1]
+            # bboxes[:, 3:5] = bbox_out[i][0][:, 2:4]
+            # bboxes[:, 5] = 2.1
+            # # # bboxes[:, 5] = bbox_out[i][0][:, 3]
+            # bboxes[:, 6:7] = bbox_out[i][0][:, 4:5]
+            bboxes = bbox_out[i][0][:, :-1]
+            bboxes[:, 2] -= 1.6
 
             bboxes = img_metas[i]["box_type_3d"](bboxes, box_dim=7)
             scores = bbox_out[i][0][:, -1]

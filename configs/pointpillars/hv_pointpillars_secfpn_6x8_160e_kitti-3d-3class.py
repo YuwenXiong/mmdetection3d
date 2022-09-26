@@ -4,7 +4,7 @@ _base_ = [
     '../_base_/schedules/cyclic_40e.py', '../_base_/default_runtime.py'
 ]
 
-point_cloud_range = [0, -39.68, -3, 69.12, 39.68, 1]
+point_cloud_range = [0, -40, -2, 72.5, 40.0, 4]
 # dataset settings
 data_root = 'data/kitti/'
 class_names = ['Pedestrian', 'Cyclist', 'Car']
@@ -36,7 +36,7 @@ db_sampler = dict(
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=4,
-        use_dim=4,
+        use_dim=3,
         file_client_args=file_client_args),
     file_client_args=file_client_args)
 
@@ -46,7 +46,7 @@ train_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=4,
-        use_dim=4,
+        use_dim=3,
         file_client_args=file_client_args),
     dict(
         type='LoadAnnotations3D',
@@ -59,8 +59,8 @@ train_pipeline = [
         type='GlobalRotScaleTrans',
         rot_range=[-0.78539816, 0.78539816],
         scale_ratio_range=[0.95, 1.05]),
-    dict(type='PointsRangeFilter', point_cloud_range=point_cloud_range),
-    dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
+    dict(type='PointsRangeFilter', point_cloud_range=[0, -40, -2 - 1.6, 72.5, 40.0, 4 - 1.6]),
+    dict(type='ObjectRangeFilter', point_cloud_range=[0, -40, -2 - 1.6, 72.5, 40.0, 4 - 1.6]),
     dict(type='PointShuffle'),
     dict(type='DefaultFormatBundle3D', class_names=class_names),
     dict(type='Collect3D', keys=['points', 'gt_bboxes_3d', 'gt_labels_3d'])
@@ -70,7 +70,7 @@ test_pipeline = [
         type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=4,
-        use_dim=4,
+        use_dim=3,
         file_client_args=file_client_args),
     dict(
         type='MultiScaleFlipAug3D',
@@ -85,7 +85,7 @@ test_pipeline = [
                 translation_std=[0, 0, 0]),
             dict(type='RandomFlip3D'),
             dict(
-                type='PointsRangeFilter', point_cloud_range=point_cloud_range),
+                type='PointsRangeFilter', point_cloud_range=[0, -40, -2 - 1.6, 72.5, 40.0, 4 - 1.6]),
             dict(
                 type='DefaultFormatBundle3D',
                 class_names=class_names,
@@ -101,7 +101,7 @@ data = dict(
 
 # In practice PointPillars also uses a different schedule
 # optimizer
-lr = 0.001 / 2
+lr = 0.001 / 4
 optimizer = dict(lr=lr)
 # max_norm=35 is slightly better than 10 for PointPillars in the earlier
 # development of the codebase thus we keep the setting. But we does not

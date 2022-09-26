@@ -3,12 +3,13 @@
 _base_ = [
     "../_base_/models/waabi_two_stage_kitti.py",
     "../_base_/datasets/kitti-3d-3class.py",
+    # "../_base_/datasets/pandaset-3d-car.py",
     "../_base_/schedules/cyclic_40e.py",
     "../_base_/default_runtime.py",
 ]
 
 
-point_cloud_range = [0, -39.68, -3, 69.12, 39.68, 1]
+point_cloud_range = [0, -40, -2, 69.12, 39.68, 4]
 model = dict(
     bbox_head=dict(
         type="Anchor3DHead",
@@ -58,14 +59,14 @@ train_pipeline = [
     dict(type="ObjectSample", db_sampler=db_sampler, use_ground_plane=True),
     dict(type="RandomFlip3D", flip_ratio_bev_horizontal=0.5),
     dict(type="GlobalRotScaleTrans", rot_range=[-0.78539816, 0.78539816], scale_ratio_range=[0.95, 1.05]),
-    dict(type="PointsRangeFilter", point_cloud_range=point_cloud_range),
-    dict(type="ObjectRangeFilter", point_cloud_range=point_cloud_range),
+    dict(type="PointsRangeFilter", point_cloud_range=[0, -40, -2 - 1.6, 72.5, 40, 4 - 1.6]),
+    dict(type="ObjectRangeFilter", point_cloud_range=[0, -40, -2 - 1.6, 72.5, 40, 4 - 1.6]),
     dict(type="PointShuffle"),
     dict(type="DefaultFormatBundle3D", class_names=class_names),
     dict(type="Collect3D", keys=["points", "gt_bboxes_3d", "gt_labels_3d"]),
 ]
 test_pipeline = [
-    dict(type="LoadPointsFromFile", coord_type="LIDAR", load_dim=4, use_dim=4),
+    dict(type="LoadPointsFromFile", coord_type="LIDAR", load_dim=4, use_dim=3),
     dict(
         type="MultiScaleFlipAug3D",
         img_scale=(1333, 800),
@@ -74,7 +75,7 @@ test_pipeline = [
         transforms=[
             dict(type="GlobalRotScaleTrans", rot_range=[0, 0], scale_ratio_range=[1.0, 1.0], translation_std=[0, 0, 0]),
             dict(type="RandomFlip3D"),
-            dict(type="PointsRangeFilter", point_cloud_range=point_cloud_range),
+            dict(type="PointsRangeFilter", point_cloud_range=[0, -40, -2 - 1.6, 72.5, 40, 4 - 1.6]),
             dict(type="DefaultFormatBundle3D", class_names=class_names, with_label=False),
             dict(type="Collect3D", keys=["points"]),
         ],
