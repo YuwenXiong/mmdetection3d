@@ -238,7 +238,7 @@ class SpatialFusionLayer(nn.Module):
         super().__init__()
         # self.self_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
         self.self_attn = MultiScaleDeformableAttention(
-            d_model, num_levels=n_levels, num_heads=n_heads, num_points=n_points, batch_first=True
+            d_model, num_levels=n_levels, num_heads=n_heads, num_points=n_points, batch_first=True, dropout=dropout,
         )
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
@@ -272,8 +272,8 @@ class SpatialFusionLayer(nn.Module):
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
         )
-        src = src + self.dropout1(src2)
-        src = self.norm1(src)
+        # src = src + self.dropout1(src2)
+        src = self.norm1(src2)
         # ffn
         src = self.forward_ffn(src)
 

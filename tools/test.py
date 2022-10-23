@@ -201,11 +201,11 @@ def main():
     fp16_cfg = cfg.get("fp16", None)
     if fp16_cfg is not None:
         wrap_fp16_model(model)
-    # model.load_state_dict(torch.load(args.checkpoint, map_location="cpu")["model"], strict=False)
+    # print(model.load_state_dict(torch.load(args.checkpoint, map_location="cpu")["model"], strict=False))
     try:
-        model.load_state_dict(torch.load(args.checkpoint, map_location="cpu")["model"], strict=False)
+        print(model.load_state_dict(torch.load(args.checkpoint, map_location="cpu")["model"], strict=False))
     except:
-        # model.load_state_dict(torch.load(args.checkpoint, map_location="cpu"), strict=False)
+        # print(model.load_state_dict(torch.load(args.checkpoint, map_location="cpu"), strict=False))
         checkpoint = load_checkpoint(model, args.checkpoint, map_location="cpu")
 
     if args.fuse_conv_bn:

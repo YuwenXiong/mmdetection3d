@@ -174,7 +174,7 @@ class PandasetDataset(Custom3DDataset):
 
         input_dict = dict(
             pts_filename=info["lidar_path"],
-            timestamp=info["timestamp"],
+            # timestamp=info["timestamp"],
             sdv_pose=info["sdv_pose"],
         )
 

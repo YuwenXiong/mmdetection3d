@@ -114,3 +114,7 @@ runner = dict(max_epochs=80)
 
 # Use evaluation interval=2 reduce the number of evaluation timese
 evaluation = dict(interval=2)
+
+find_unused_parameters = True
+work_dir = "work_dirs/hv_pointpillars_secfpn_6x8_160e_kitti-3d-car-binarynewvoxel_height_fix_kitti_anchor"
+cudnn_benchmark = True

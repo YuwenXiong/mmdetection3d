@@ -8,7 +8,7 @@ _base_ = [
 
 # point_cloud_range = [0, -39.68, -2, 79.36, 39.68, 4]
 point_cloud_range = [0, -40, -2, 80.0, 40.0, 4]
-data_root = "data/pandaset/"
+data_root = "data/pandaset_sim512/"
 class_names = ["Car"]
 file_client_args = dict(backend="disk")
 model = dict(
@@ -56,7 +56,7 @@ model = dict(
 train_pipeline = [
     dict(type="LoadPointsFromFile", coord_type="LIDAR", load_dim=3, use_dim=3),
     dict(type="LoadAnnotations3D", with_bbox_3d=True, with_label_3d=True),
-    dict(type="RandomFlip3D", flip_ratio_bev_horizontal=0.5),
+    # dict(type="RandomFlip3D", flip_ratio_bev_horizontal=0.5),
     dict(type="GlobalRotScaleTrans", rot_range=[-0.78539816, 0.78539816], scale_ratio_range=[0.95, 1.05]),
     dict(type="PointsRangeFilter", point_cloud_range=[0, -40, -2 - 0.4, 80.0, 40.0, 4 - 0.4]),
     dict(type="ObjectRangeFilter", point_cloud_range=[0, -40, -2 - 0.4, 80.0, 40.0, 4 - 0.4]),
@@ -113,5 +113,5 @@ checkpoint_config = dict(interval=2)
 
 
 find_unused_parameters = True
-work_dir = "work_dirs/hv_pointpillars_secfpn_6x8_160e_pandaset-3d-car-binarynewvoxel_height_fix_kitti_anchor"
+work_dir = "work_dirs/hv_pointpillars_secfpn_6x8_80e_pandaset-3d-car-binarynewvoxel_height_fix_kitti_anchor_sim512_data_fix2"
 cudnn_benchmark = True

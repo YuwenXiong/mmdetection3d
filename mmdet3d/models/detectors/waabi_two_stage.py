@@ -4,7 +4,8 @@ import warnings
 from mmdet.models import TwoStageDetector
 
 from mmdet3d.core.bbox.transforms import bbox3d2result
-from mmdet3d.models.detectors.vqvae import LidarVQGAN
+from mmdet3d.models.detectors.vqvae import LidarVQGAN, VectorQuantizer
+from mmdet3d.models.detectors.vqvit_cont import LidarVQViT
 from ..builder import DETECTORS, build_backbone, build_head, build_neck
 from .base import Base3DDetector
 from mmcv.ops.roi_align_rotated import RoIAlignRotated
@@ -15,6 +16,41 @@ from torch.nn import functional as F
 from torchvision.ops import sigmoid_focal_loss
 import torch
 from mmdet3d.core.post_processing import nms_bev
+from mmcv.ops.box_iou_rotated import box_iou_rotated
+from scipy.optimize import linear_sum_assignment
+
+z_offset = 1.6
+# z_offset = 0.4
+
+
+def _sample_logistic(shape, out=None):
+
+    U = out.resize_(shape).uniform_() if out is not None else torch.rand(shape)
+    # U2 = out.resize_(shape).uniform_() if out is not None else th.rand(shape)
+
+    return torch.log(U) - torch.log(1 - U)
+
+
+def _sigmoid_sample(logits, tau=1):
+    """
+    Implementation of Bernouilli reparametrization based on Maddison et al. 2017
+    """
+    dims = logits.dim()
+    logistic_noise = _sample_logistic(logits.size(), out=logits.data.new())
+    y = logits + logistic_noise
+    return torch.sigmoid(y / tau)
+
+
+def gumbel_sigmoid(logits, tau=1, hard=False):
+
+    # shape = logits.size()
+    y_soft = _sigmoid_sample(logits, tau=tau)
+    if hard:
+        y_hard = torch.where(y_soft > 0.5, torch.ones_like(y_soft), torch.zeros_like(y_soft))
+        y = y_hard.data - y_soft.data + y_soft
+    else:
+        y = y_soft
+    return y
 
 
 class Voxelizer(torch.nn.Module):
@@ -76,12 +112,14 @@ class Voxelizer(torch.nn.Module):
         # 1 & 2. Convert points to tensor index location. Clamp z indices to
         # valid range.
         indices_h = torch.floor((self.y_max - lidar[:, 1]) / self.step).long()
+        # indices_h = torch.floor((lidar[:, 1] - self.y_min) / self.step).long()
         indices_w = torch.floor((lidar[:, 0] - self.x_min) / self.step).long()
-        indices_d = torch.clamp(
-            torch.floor((lidar[:, 2] - self.z_min) / self.z_step),
-            0,
-            self.z_depth - 1,
-        ).long()
+        indices_d = torch.floor((lidar[:, 2] - self.z_min) / self.z_step).long()
+        # indices_d = torch.clamp(
+        #     torch.floor((lidar[:, 2] - self.z_min) / self.z_step),
+        #     0,
+        #     self.z_depth - 1,
+        # ).long()
         # 3. Remove points out of bound
         valid_mask = ~torch.any(
             torch.stack(
@@ -90,6 +128,8 @@ class Voxelizer(torch.nn.Module):
                     indices_h >= self.height,
                     indices_w < 0,
                     indices_w >= self.width,
+                    indices_d < 0,
+                    indices_d >= self.z_depth,
                 ]
             ),
             dim=0,
@@ -205,6 +245,9 @@ class DetectionLoss(nn.Module):
         else:
             num_bboxes = max(1, sum([len(x) for x in gt["bboxes"]]))
 
+        loss_dict = {}
+        # import ipdb; ipdb.set_trace()
+
         for c in [0]:
             for stage in ["propose", "refine"]:
                 out: Dict[str, Tensor] = {
@@ -221,9 +264,15 @@ class DetectionLoss(nn.Module):
                 cls = self.cls_loss(out, gt, pos_idcs, neg_idcs, gt_idcs, num_bboxes)
                 iou = self.reg_loss(out, gt, pos_idcs, gt_idcs, num_bboxes)
 
-                loss += self.weights["cls"] * cls + self.weights["iou"] * iou
-                meta[f"det/{c}/{stage}_cls"] = float(cls)
-                meta[f"det/{c}/{stage}_iou"] = float(iou)
+                # import ipdb; ipdb.set_trace()
+
+                # loss += self.weights["cls"] * cls + self.weights["iou"] * iou
+                # meta[f"det/{c}/{stage}_cls"] = float(cls)
+                # meta[f"det/{c}/{stage}_iou"] = float(iou)
+                loss_dict[f"{stage}_cls_loss"] = self.weights["cls"] * cls
+                loss_dict[f"{stage}_box_loss"] = self.weights["iou"] * iou[0]
+                loss_dict[f"{stage}_iou_loss"] = self.weights["iou"] * iou[1]
+                loss_dict[f"{stage}_angle_loss"] = self.weights["iou"] * iou[2]
 
                 if stage == "refine" and "tracks" in out:
                     track = self.track_loss(out, gt, pos_idcs, gt_idcs, num_bboxes)
@@ -235,7 +284,7 @@ class DetectionLoss(nn.Module):
                     heading = self.heading_loss(out, gt, pos_idcs, gt_idcs)
                     loss += self.weights["heading"] * heading
                     meta[f"det/{c}/{stage}_head"] = float(heading)
-        return loss, meta
+        return loss_dict
 
     @torch.no_grad()
     def matcher(self, out, gt, dontcare_iou=None, pos_iou=None):
@@ -257,21 +306,27 @@ class DetectionLoss(nn.Module):
             cost += self.weights["cls"] * cls_cost
 
             bboxes, gt_bboxes = out["bboxes"][i], gt["bboxes"][i]
-            iou_cost = get_iou_loss(bboxes[:, :4], gt_bboxes[:, :4], cross=True)
+            # if bboxes.shape[-1] == 5:
+            #     iou_cost = get_iou_loss(bboxes[:, :4], gt_bboxes[:, [0, 1, 3, 4]], cross=True)
+            # else:
+            iou_cost = get_iou_loss(bboxes[:, [0, 1, 3, 4]], gt_bboxes[:, [0, 1, 3, 4]], cross=True)
 
             bboxes = bboxes.unsqueeze(1).repeat(1, len(gt_bboxes), 1)
             gt_bboxes = gt_bboxes.unsqueeze(0).repeat(len(bboxes), 1, 1)
 
-            box_cost = F.smooth_l1_loss(bboxes[:, :, :4], gt_bboxes[:, :, :4], reduction="none")
+            # if bboxes.shape[-1] == 5:
+            #     box_cost = F.smooth_l1_loss(bboxes[:, :, :4], gt_bboxes[:, :, [0, 1, 3, 4]], reduction="none")
+            # else:
+            box_cost = F.smooth_l1_loss(bboxes[:, :, :6], gt_bboxes[:, :, :6], reduction="none")
             box_cost = box_cost.sum(2)
 
-            theta = 2.0 * bboxes[:, :, 4]
-            gt_theta = 2.0 * gt_bboxes[:, :, 4]
+            theta = 2.0 * bboxes[:, :, -1]
+            gt_theta = 2.0 * gt_bboxes[:, :, -1]
             sin_cost = F.smooth_l1_loss(theta.sin(), gt_theta.sin(), reduction="none")
             cos_cost = F.smooth_l1_loss(theta.cos(), gt_theta.cos(), reduction="none")
             angle_cost = sin_cost + cos_cost
 
-            cost += self.weights["iou"] * (iou_cost + 0.1 * box_cost + angle_cost)
+            cost += self.weights["iou"] * (iou_cost + 1.0 * box_cost + angle_cost)
 
             idcs_a, idcs_b = linear_sum_assignment(cost.cpu())
             pos_idcs.append(torch.as_tensor(idcs_a, device=gt["bboxes"][0].device, dtype=torch.int64))
@@ -295,7 +350,12 @@ class DetectionLoss(nn.Module):
             for i in range(batch_size):
                 if len(pos_idcs[i]) == 0 or len(neg_idcs[i]) == 0:
                     continue
-                iou_mat = rbox_iou_2sets_gpu(out["bboxes"][i][pos_idcs[i]], out["bboxes"][i][neg_idcs[i]])
+                # iou_mat = box_iou_rotated(out["bboxes"][i][pos_idcs[i]], out["bboxes"][i][neg_idcs[i]], clockwise=False)
+                iou_mat = box_iou_rotated(
+                    out["bboxes"][i][pos_idcs[i]][..., [0, 1, 3, 4, 6]],
+                    out["bboxes"][i][neg_idcs[i]][..., [0, 1, 3, 4, 6]],
+                    clockwise=True,
+                )
                 max_iou, _ = iou_mat.max(0)
                 mask = max_iou < dontcare_iou
                 neg_idcs[i] = neg_idcs[i][mask]
@@ -305,7 +365,14 @@ class DetectionLoss(nn.Module):
             for i in range(batch_size):
                 if len(pos_idcs[i]) == 0:
                     continue
-                iou_mat = rbox_iou_2sets_gpu(out["rois"][i][pos_idcs[i]], gt["bboxes"][i][gt_idcs[i]])
+                # iou_mat = box_iou_rotated(
+                #     out["rois"][i][pos_idcs[i]], gt["bboxes"][i][gt_idcs[i]][..., [0, 1, 3, 4, 6]], clockwise=False
+                # )
+                iou_mat = box_iou_rotated(
+                    out["rois"][i][pos_idcs[i]][..., [0, 1, 3, 4, 6]],
+                    gt["bboxes"][i][gt_idcs[i]][..., [0, 1, 3, 4, 6]],
+                    clockwise=True,
+                )
                 iou = iou_mat.diag()
                 pos_iou_vec = pos_iou[cls_idcs[i]]
                 mask = iou > pos_iou_vec
@@ -339,16 +406,20 @@ class DetectionLoss(nn.Module):
         gt_bboxes = [gt["bboxes"][i][gt_idcs[i]] for i in range(batch_size)]
         gt_bboxes = torch.cat(gt_bboxes, 0)
 
-        box_loss = F.smooth_l1_loss(bboxes[:, :4], gt_bboxes[:, :4], reduction="sum") / num_bboxes
+        # if bboxes.shape[-1] == 5:
+        #     box_loss = F.smooth_l1_loss(bboxes[:, :4], gt_bboxes[:, [0, 1, 3, 4]], reduction="sum") / num_bboxes
+        #     iou_loss = get_iou_loss(bboxes[:, :4], gt_bboxes[:, [0, 1, 3, 4]]) / num_bboxes
+        # else:
+        box_loss = F.smooth_l1_loss(bboxes[:, :6], gt_bboxes[:, :6], reduction="sum") / num_bboxes
+        iou_loss = get_iou_loss(bboxes[:, [0, 1, 3, 4]], gt_bboxes[:, [0, 1, 3, 4]]) / num_bboxes
 
-        iou_loss = get_iou_loss(bboxes[:, :4], gt_bboxes[:, :4]) / num_bboxes
-
-        theta = 2.0 * bboxes[:, 4]
-        gt_theta = 2.0 * gt_bboxes[:, 4]
+        theta = 2.0 * bboxes[:, -1]
+        gt_theta = 2.0 * gt_bboxes[:, -1]
         sin_loss = F.smooth_l1_loss(theta.sin(), gt_theta.sin(), reduction="sum")
         cos_loss = F.smooth_l1_loss(theta.cos(), gt_theta.cos(), reduction="sum")
         angle_loss = (sin_loss + cos_loss) / num_bboxes
-        return 0.1 * box_loss + iou_loss + angle_loss
+        # return 0.1 * box_loss + iou_loss + angle_loss
+        return 1.0 * box_loss, iou_loss, angle_loss
 
     def track_loss(self, out, gt, pos_idcs, gt_idcs, num_bboxes):
         batch_size = len(pos_idcs)
@@ -408,24 +479,31 @@ class DetectionLoss(nn.Module):
 
 def bev_reg_to_bboxes(reg: Tensor, bev_range: Tuple[float, float, float, float]) -> Tensor:
     N, C, H, W = reg.shape
-    assert C == 6
+    # assert C == 6
+    x_min, x_max, y_min, y_max = bev_range
 
-    if isinstance(bev_range, Tensor):
-        x_min, x_max, y_min, y_max = bev_range.chunk(4, dim=-1)
-        bev_range_shape = x_min.shape[0]
-    else:
-        x_min, x_max, y_min, y_max = bev_range
-        bev_range_shape = 1
-
-    bboxes = torch.empty((N, H, W, 5), device=reg.device, dtype=reg.dtype)
+    bboxes = torch.empty((N, H, W, 7), device=reg.device, dtype=reg.dtype)
     x = x_min + (torch.arange(W, device=reg.device, dtype=reg.dtype) + 0.5) / W * (x_max - x_min)
     y = y_max - (torch.arange(H, device=reg.device, dtype=reg.dtype) + 0.5) / H * (y_max - y_min)
-    bboxes[..., 0] = x.view(bev_range_shape, 1, W) + reg[:, 0]
-    bboxes[..., 1] = y.view(bev_range_shape, H, 1) + reg[:, 1]
+    bboxes[..., 0] = x.view(1, 1, W) + reg[:, 0]
+    bboxes[..., 1] = y.view(1, H, 1) + reg[:, 1]
     bboxes[..., 2] = reg[:, 2]
     bboxes[..., 3] = reg[:, 3]
-    bboxes[..., 4] = torch.atan2(reg[:, 4], reg[:, 5])
-    bboxes = bboxes.view(N, H * W, 5)
+    bboxes[..., 4] = reg[:, 4]
+    bboxes[..., 5] = reg[:, 5]
+    bboxes[..., 6] = torch.atan2(reg[:, 6], reg[:, 7])
+    bboxes = bboxes.view(N, H * W, 7)
+
+    # bboxes = torch.empty((N, H, W, 5), device=reg.device, dtype=reg.dtype)
+    # x = x_min + (torch.arange(W, device=reg.device, dtype=reg.dtype) + 0.5) / W * (x_max - x_min)
+    # y = y_max - (torch.arange(H, device=reg.device, dtype=reg.dtype) + 0.5) / H * (y_max - y_min)
+    # # y = y_min + (torch.arange(H, device=reg.device, dtype=reg.dtype) + 0.5) / H * (y_max - y_min)
+    # bboxes[..., 0] = x.view(1, 1, W) + reg[:, 0]
+    # bboxes[..., 1] = y.view(1, H, 1) + reg[:, 1]
+    # bboxes[..., 2] = reg[:, 2]
+    # bboxes[..., 3] = reg[:, 3]
+    # bboxes[..., 4] = torch.atan2(reg[:, 4], reg[:, 5])
+    # bboxes = bboxes.view(N, H * W, 5)
     return bboxes
 
 
@@ -449,15 +527,17 @@ def batch_index(batch, batch_idcs):
     return data
 
 
-def gt_from_label(labels, bev_range, classes, track=False, labels_history=None):
+def gt_from_label(gt_bboxes, gt_labels, bev_range, classes, track=False, labels_history=None, device=None):
 
     if isinstance(bev_range, Tensor):
         x_min_all, x_max_all, y_min_all, y_max_all = bev_range.chunk(4, dim=-1)
     else:
         x_min, x_max, y_min, y_max = bev_range
     gt: Dict[str, List[Tensor]] = dict(bboxes=[], cls_idcs=[], ignore=[], tracks=[])
+    if device is None:
+        device = gt_bboxes[0].device
 
-    batch_size = len(labels)
+    batch_size = len(gt_bboxes)
     for i in range(batch_size):
         gt["bboxes"].append([])
         gt["cls_idcs"].append([])
@@ -469,19 +549,20 @@ def gt_from_label(labels, bev_range, classes, track=False, labels_history=None):
             y_min = y_min_all[i]
             y_max = y_max_all[i]
         for j, c in enumerate(classes):
-            if c not in labels[i]:
-                continue
 
-            label = labels[i][c]
-            x, y = label.trajectories[:, 0, 0], label.trajectories[:, 0, 1]
-            l, w = label.boxes[:, 0], label.boxes[:, 1]
-            theta = label.yaw[:, 0]
+            label = gt_labels[i] == c
+            x, y, z, l, w, h, theta = gt_bboxes[i][label].tensor.chunk(7, dim=1)
+            z += z_offset
+            # x, y = label.trajectories[:, 0, 0], label.trajectories[:, 0, 1]
+            # l, w = label.boxes[:, 0], label.boxes[:, 1]
+            # theta = label.yaw[:, 0]
             mask = (x > x_min) & (x < x_max) & (y > y_min) & (y < y_max)
 
-            bboxes = torch.stack((x[mask], y[mask], l[mask], w[mask], theta[mask]), -1)
-            cls_idcs = j * torch.ones(len(bboxes), device=bboxes.device, dtype=torch.int64)
+            bboxes = torch.stack((x[mask], y[mask], z[mask], l[mask], w[mask], h[mask], theta[mask]), -1).to(device)
+            cls_idcs = j * torch.ones(len(bboxes), device=device, dtype=torch.int64)
             # cls_idcs = c.value * torch.ones(len(bboxes), device=bboxes.device, dtype=torch.int64)
-            ignore = label.ignores[mask]
+            # ignore = label.ignores[mask]
+            ignore = torch.zeros(len(bboxes), device=device, dtype=torch.bool)
             # ignore[torch.where((bboxes[:, 0].abs() < 2) & (bboxes[:, 1].abs() < 2))] = True
 
             gt["bboxes"][i].append(bboxes)
@@ -553,12 +634,13 @@ def get_roi_feats(fm, rois, bev_range: Tuple[float, float, float, float], op: Ro
     rois = torch.cat((idcs.view(-1, 1, 1).repeat(1, num_rois, 1), rois), 2)  # (N, K, 6)
     rois[..., 1] = (rois[..., 1] - x_min) / (x_max - x_min) * W
     rois[..., 2] = (y_max - rois[..., 2]) / (y_max - y_min) * H
+    # rois[..., 2] = (rois[..., 2] - y_min) / (y_max - y_min) * H
     rois[..., 3] = rois[..., 3] / (x_max - x_min) * W
     rois[..., 4] = rois[..., 4] / (y_max - y_min) * H
     rois[..., 5] = rois[..., 5]
     rois = rois.view(N * num_rois, 6)
 
-    feats = op.forward(fm, rois)
+    feats = op.forward(fm.contiguous(), rois.contiguous())
     feats = feats.view(N, num_rois, C, -1).transpose(2, 3).contiguous()
     return feats
 
@@ -725,6 +807,29 @@ class SpatialAttention(nn.Module):
         return torch.stack(batch, 0)
 
 
+class LayerNorm(nn.Module):
+    """
+    A LayerNorm variant, popularized by Transformers, that performs point-wise mean and
+    variance normalization over the channel dimension for inputs that have shape
+    (batch_size, channels, height, width).
+    https://github.com/facebookresearch/ConvNeXt/blob/d1fa8f6fef0a165b27399986cc2bdacc92777e40/models/convnext.py#L119  # noqa B950
+    """
+
+    def __init__(self, normalized_shape, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(normalized_shape))
+        self.bias = nn.Parameter(torch.zeros(normalized_shape))
+        self.eps = eps
+        self.normalized_shape = (normalized_shape,)
+
+    def forward(self, x):
+        u = x.mean(1, keepdim=True)
+        s = (x - u).pow(2).mean(1, keepdim=True)
+        x = (x - u) / torch.sqrt(s + self.eps)
+        x = self.weight[:, None, None] * x + self.bias[:, None, None]
+        return x
+
+
 @DETECTORS.register_module()
 class WaabiTwoStageDetector(Base3DDetector):
     """Base class of two-stage 3D detector.
@@ -762,7 +867,7 @@ class WaabiTwoStageDetector(Base3DDetector):
         # self.bev_range = (self.voxel_cfg.x_min, self.voxel_cfg.x_max, self.voxel_cfg.y_min, self.voxel_cfg.y_max)
         # [0, -39.68, -3, 69.12, 39.68, 1]
         # self.bev_range = [0, 69.12, -39.68, 39.68]
-        self.bev_range = [0, 70, -40, 40]
+        self.bev_range = [0, 80, -40, 40]
         self.roi_size = 3
         self.dist_th = 20.0  # distance threshold used in spatial attention
         weights = dict(cls=1.0, iou=2.0, track=1.0, heading=1.0)  # weights of multi-task loss
@@ -773,12 +878,15 @@ class WaabiTwoStageDetector(Base3DDetector):
         n = 128  # feature dimension
 
         # Post-processing hyperparameters
-        self.conf_thresh = 0.00
+        self.conf_thresh = 0.1
         self.max_det = 100
 
         self.voxelizer = Voxelizer(
             self.bev_range[0], self.bev_range[1], self.bev_range[2], self.bev_range[3], 0.15625, -2, 4, 0.15
         )
+        # self.voxelizer = Voxelizer(
+        #     self.bev_range[0], self.bev_range[1], self.bev_range[2], self.bev_range[3], 0.3, -2, 4, 0.3
+        # )
 
         # First stage detection header
         propose = dict()
@@ -790,7 +898,7 @@ class WaabiTwoStageDetector(Base3DDetector):
         propose["reg"] = nn.Sequential(
             Conv(n, n),
             Conv(n, n),
-            nn.Conv2d(n, 6, 1, padding=0),
+            nn.Conv2d(n, 8, 1, padding=0),
         )
         self.propose = nn.ModuleDict(propose)
 
@@ -822,18 +930,42 @@ class WaabiTwoStageDetector(Base3DDetector):
         # Detection loss
         self.det_loss = DetectionLoss(weights, focal, dontcare_iou, pos_iou)
 
-        self.preprocessor = LidarVQGAN()
-        self.preprocessor.load_state_dict(
-            torch.load(
-                "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-24_21-16-06_vqvae_sim512_zh_bottom_box_decoder_frozen/checkpoint/vqvae.pth",
-                # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-21_03-41-58_vqvae_decoder_frozen/checkpoint/vqvae.pth",
-                # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvae.pth",
-                # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/ae_baseline.pth",
-                map_location="cpu",
-            ),
-            strict=False,
-        )
-        # self.preprocessor = None
+        # self.pre_quant = nn.Sequential(nn.Conv2d(128, 256, 1, bias=False), LayerNorm(256))
+        # self.quantizer = VectorQuantizer(2048, 256, 0.25)
+        # self.post_quant = nn.Sequential(Conv(256, 128))
+
+        # self.preprocessor = LidarVQGAN()
+        # self.preprocessor = LidarVQViT()
+        # print(
+        #     self.preprocessor.load_state_dict(
+        #         torch.load(
+        #             '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vit_1024_1024_50ep_v6_novq.pth.tar',
+        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_continuous_1024_1024_170ep.pth.tar',
+        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_125ep_v6_noploss.pth.tar',
+        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_continuous_1024_1024_130ep.pth.tar',
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_90ep_v6_nodropbeam.pth.tar",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_v5data/checkpoint/model_00140e.pth.tar",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_residual_1024_512_20ep.pth.tar",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_sparse_1024_512_140ep.pth.tar",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_2048_512_80ep.pth.tar",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_80ep.pth.tar",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvit_2048code_sparse_to_dense_ploss_00100e.pth.tar",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvit_2048code_sparse_to_dense_ploss_00070e.pth.tar",
+        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-10-01_19-30-39_new_arch2_1024code_decoder_frozen/checkpoint/model_00080e.pth.tar',
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvit_1024code_sparse_00120e.pth.tar",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvit_2048code_sparse_to_dense_00150e.pth.tar",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvit_1024code_nonoccluded_00180e.pth.tar",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-30_03-36-08_vqvae_sim512_zh_bottom_box_new_arch_nowd_1024code_decoder_frozen/checkpoint/vqvae_ep60.pth",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-24_21-16-06_vqvae_sim512_zh_bottom_box_decoder_frozen/checkpoint/vqvae.pth",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-21_03-41-58_vqvae_decoder_frozen/checkpoint/vqvae.pth",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvae.pth",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/ae_baseline.pth",
+        #             map_location="cpu",
+        #         ),  # ["model"],
+        #         strict=False,
+        #     )
+        # )
+        self.preprocessor = None
 
     def forward_dummy(self, points):
         """Used for computing network flops.
@@ -866,7 +998,8 @@ class WaabiTwoStageDetector(Base3DDetector):
         roi_list = []
         for i in range(len(bboxes)):
             # keep_id = nms(torch.cat((max_logits[i][:1000].unsqueeze(1), bboxes[i][:1000]), 1), self.nms_th)
-            keep_id = nms_bev(bboxes[i][:1000], max_logits[i][:1000], self.nms_th, xywhr=True)
+            # keep_id = nms_bev(bboxes[i][:1000], max_logits[i][:1000], self.nms_th, xywhr=True)
+            keep_id = nms_bev(bboxes[i][:1000, [0, 1, 3, 4, 6]], max_logits[i][:1000], self.nms_th, xywhr=True)
             if len(keep_id) >= self.num_dets:
                 keep_id = keep_id[: self.num_dets]
             else:
@@ -878,8 +1011,12 @@ class WaabiTwoStageDetector(Base3DDetector):
         # Second stage
         fm = self.input2(fm)
 
-        roi_feats = get_roi_feats(fm, rois, self.bev_range if bev_range is None else bev_range, self.roi_align_rotated)
-        roi_coords = get_roi_coords(rois, self.roi_size)
+        roi_feats = get_roi_feats(
+            fm, rois[..., [0, 1, 3, 4, 6]], self.bev_range if bev_range is None else bev_range, self.roi_align_rotated
+        )
+        roi_coords = get_roi_coords(rois[..., [0, 1, 3, 4, 6]], self.roi_size)
+        # roi_feats = get_roi_feats(fm, rois, self.bev_range if bev_range is None else bev_range, self.roi_align_rotated)
+        # roi_coords = get_roi_coords(rois, self.roi_size)
 
         obj_feats = roi_feats[:, :, int(self.roi_size ** 2 // 2)].clone()
         obj_coords = roi_coords[:, :, int(self.roi_size ** 2 // 2)].clone()
@@ -892,17 +1029,17 @@ class WaabiTwoStageDetector(Base3DDetector):
 
         reg = self.refine["reg"](obj_feats)
         refine["logits"] = self.refine["cls"](obj_feats)
-        # refine["bboxes"] = reg[:, :, :5] + rois
-        refine["bboxes"] = torch.cat(
-            [
-                reg[:, :, :2] + rois[:, :, :2],
-                reg[:, :, 2:3],
-                reg[:, :, 3:5] + rois[:, :, 2:4],
-                reg[:, :, 5:6],
-                reg[:, :, 6:7] + rois[:, :, 4:5],
-            ],
-            dim=-1,
-        )
+        refine["bboxes"] = reg[:, :, :7] + rois
+        # refine["bboxes"] = torch.cat(
+        #     [
+        #         reg[:, :, :2] + rois[:, :, :2],
+        #         reg[:, :, 2:3],
+        #         reg[:, :, 3:5] + rois[:, :, 2:4],
+        #         reg[:, :, 5:6],
+        #         reg[:, :, 6:7] + rois[:, :, 4:5],
+        #     ],
+        #     dim=-1,
+        # )
         refine["rois"] = rois
 
         if self.has_heading:
@@ -973,14 +1110,35 @@ class WaabiTwoStageDetector(Base3DDetector):
     def forward_model(self, points):
         assert not hasattr(self.backbone, "map_channels")
 
+        # _, input, gt = torch.load("/home/yuwen/av/model_check.pth")
+        # self.load_state_dict(
+        #     torch.load("/home/yuwen/mmdetection3d/work_dirs/waabi_two_stage_pandaset-3d-car-run3/epoch_31.pth")[
+        #         "state_dict"
+        #     ],
+        #     strict=True,
+        # )
+        # self.eval()
+        # # self.load_state_dict(state_dict)
+        # points = [[p[0]] for p in input]
+
         for p in points:
-            p[0][:, 2] += 1.6
+            p[0][:, 2] += z_offset
         bev = self.voxelizer(points)
+        # import ipdb; ipdb.set_trace()
         if self.preprocessor is not None:
             residual, _ = self.preprocessor.forward(bev)
-            bev = (bev * 20 + residual).sigmoid()
-        fm = self.backbone(bev)[0]
-        header_out = self.forward_header(fm.float())
+            # bev = gumbel_sigmoid(bev * 200 + residual, hard=True)
+            bev = (bev * 200 + residual).sigmoid()
+            # bev[bev < 0.3] = 0
+            # bev = (gumbel_sigmoid(residual, hard=True)).float()
+            # bev = (residual.sigmoid()).float()
+            # import ipdb; ipdb.set_trace()
+        feat = self.backbone(bev)
+        fm = feat[0]
+        # q_fm, _, _ = self.quantizer(self.pre_quant(fm))
+        q_fm = fm
+        # q_fm = self.post_quant(q_fm)
+        header_out = self.forward_header(q_fm.float())
         return header_out
 
         # return self.det_post_process(fm, header_out, post_process=False)
@@ -996,11 +1154,41 @@ class WaabiTwoStageDetector(Base3DDetector):
             x = self.neck(x)
         return x
 
+    def forward_train(self, points, img_metas, gt_bboxes_3d, gt_labels_3d, gt_bboxes_ignore=None):
+
+        # import copy
+        # pts = copy.deepcopy(points)
+        header_out = self.forward_model([[_] for _ in points])
+        det_out: Dict[int, Dict[str, Tensor]] = dict()
+
+        for c in [0]:
+            class_output: Dict[str, Tensor] = dict()
+            for k, v in header_out.items():
+                for k1, v1 in v.items():
+                    class_output[k + "_" + k1] = v1
+            det_out[c] = class_output
+
+        gt = gt_from_label(
+            # batch_data.labels,
+            gt_bboxes_3d,
+            gt_labels_3d,
+            self.bev_range,
+            classes=self.active_classes,
+            device=points[0].device,
+        )
+        # _, input, gt = torch.load("/home/yuwen/av/model_check.pth")
+
+        det_loss = self.det_loss(det_out, gt)
+
+        return det_loss
+
     def extract_feats(self, points, img_metas):
         """Extract features of multiple samples."""
         return [self.extract_feat(pts, img_meta) for pts, img_meta in zip(points, img_metas)]
 
     def simple_test(self, points, img_metas, imgs=None, rescale=False):
+
+        self.eval()
 
         header_out = self.forward_model([points])
 
@@ -1019,7 +1207,7 @@ class WaabiTwoStageDetector(Base3DDetector):
             # # # bboxes[:, 5] = bbox_out[i][0][:, 3]
             # bboxes[:, 6:7] = bbox_out[i][0][:, 4:5]
             bboxes = bbox_out[i][0][:, :-1]
-            bboxes[:, 2] -= 1.6
+            bboxes[:, 2] -= z_offset
 
             bboxes = img_metas[i]["box_type_3d"](bboxes, box_dim=7)
             scores = bbox_out[i][0][:, -1]

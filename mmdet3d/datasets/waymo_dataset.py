@@ -111,9 +111,12 @@ class WaymoDataset(KittiDataset):
                 - ann_info (dict): annotation info
         """
         info = self.data_infos[index]
-        sample_idx = info['image']['image_idx']
-        img_filename = os.path.join(self.data_root,
-                                    info['image']['image_path'])
+        sample_idx = int(info["point_cloud"]["velodyne_path"][-11:-4])
+        # sample_idx = info['image']['image_idx']
+        # img_filename = os.path.join(self.data_root,
+        #                             info['image']['image_path'])
+        # img_filename = os.path.join(self.data_root,
+        #                             info['image']['image_path'])
 
         # TODO: consider use torch.Tensor only
         rect = info['calib']['R0_rect'].astype(np.float32)
@@ -126,7 +129,7 @@ class WaymoDataset(KittiDataset):
             sample_idx=sample_idx,
             pts_filename=pts_filename,
             img_prefix=None,
-            img_info=dict(filename=img_filename),
+            # img_info=dict(filename=img_filename),
             lidar2img=lidar2img)
 
         if not self.test_mode:
@@ -385,8 +388,9 @@ class WaymoDataset(KittiDataset):
                 mmcv.track_iter_progress(net_outputs)):
             annos = []
             info = self.data_infos[idx]
-            sample_idx = info['image']['image_idx']
-            image_shape = info['image']['image_shape'][:2]
+            sample_idx = info["point_cloud"]["velodyne_path"][-11:-4]
+            # sample_idx = info['image']['image_idx']
+            # image_shape = info['image']['image_shape'][:2]
 
             box_dict = self.convert_valid_bboxes(pred_dicts, info)
             if len(box_dict['bbox']) > 0:
@@ -411,7 +415,7 @@ class WaymoDataset(KittiDataset):
                 for box, box_lidar, bbox, score, label in zip(
                         box_preds, box_preds_lidar, box_2d_preds, scores,
                         label_preds):
-                    bbox[2:] = np.minimum(bbox[2:], image_shape[::-1])
+                    # bbox[2:] = np.minimum(bbox[2:], image_shape[::-1])
                     bbox[:2] = np.maximum(bbox[:2], [0, 0])
                     anno['name'].append(class_names[int(label)])
                     anno['truncated'].append(0.0)
@@ -497,7 +501,9 @@ class WaymoDataset(KittiDataset):
         box_preds = box_dict['boxes_3d']
         scores = box_dict['scores_3d']
         labels = box_dict['labels_3d']
-        sample_idx = info['image']['image_idx']
+        sample_idx = info["point_cloud"]["velodyne_path"][-11:-4]
+        # sample_idx = info['image']['image_idx']
+        # image_shape = info['image']['image_shape'][:2]
         box_preds.limit_yaw(offset=0.5, period=np.pi * 2)
 
         if len(box_preds) == 0:

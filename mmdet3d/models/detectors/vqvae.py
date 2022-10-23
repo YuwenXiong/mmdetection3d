@@ -17,8 +17,9 @@ from pykeops.torch import LazyTensor
 from scipy.cluster.vq import kmeans2
 from sklearn.cluster import kmeans_plusplus
 from torchvision.ops import sigmoid_focal_loss
-
-# from waabi.autonomy.pnp.perception.modules import backbones
+# from waabi.autonomy.pnp.openset.detr.deformable_transformer import inverse_sigmoid
+# from waabi.autonomy.pnp.perception.two_stage_detr import TwoStageDETR, detr_det_postprocess
+# from waabi.autonomy.pnp.type.internal import DetectionModelOutput
 
 # import waabi.common.distributed as dist
 # from waabi.autonomy.data.dataloader import BatchedPnPInput
@@ -29,15 +30,39 @@ from torchvision.ops import sigmoid_focal_loss
 # from waabi.autonomy.pnp.type.metadata.metric_metadata import PnPMetricMetadata
 # from waabi.common.training.experiments import ExperimentLogger
 # from waabi.metrics.detection.detection_runner import DetectionSequentialMetricsRunner
+from pykeops.torch import Genred, generic_argmin, generic_argkmin
 
-train_sparse = True
+train_sparse = False
 gumbel_sigmoid_coeff = 10
 use_vq = True
 novq_in_first2000 = True
 curriculum = False
-subsample = True
+subsample = False
 use_pair_label = True
 enable_gan = False
+
+
+class LayerNorm(nn.Module):
+    """
+    A LayerNorm variant, popularized by Transformers, that performs point-wise mean and
+    variance normalization over the channel dimension for inputs that have shape
+    (batch_size, channels, height, width).
+    https://github.com/facebookresearch/ConvNeXt/blob/d1fa8f6fef0a165b27399986cc2bdacc92777e40/models/convnext.py#L119  # noqa B950
+    """
+
+    def __init__(self, normalized_shape, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(normalized_shape))
+        self.bias = nn.Parameter(torch.zeros(normalized_shape))
+        self.eps = eps
+        self.normalized_shape = (normalized_shape,)
+
+    def forward(self, x):
+        u = x.mean(1, keepdim=True)
+        s = (x - u).pow(2).mean(1, keepdim=True)
+        x = (x - u) / torch.sqrt(s + self.eps)
+        x = self.weight[:, None, None] * x + self.bias[:, None, None]
+        return x
 
 
 class GaussianNoise(nn.Module):  # Try noise just for real or just for fake images.
@@ -152,7 +177,7 @@ class ResnetBlock(nn.Module):
         if temb_channels > 0:
             self.temb_proj = torch.nn.Linear(temb_channels, out_channels)
         self.norm2 = Normalize(out_channels)
-        self.dropout = torch.nn.Dropout(dropout)
+        # self.dropout = torch.nn.Dropout(dropout)
         self.conv2 = torch.nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
         if self.in_channels != self.out_channels:
             if self.use_conv_shortcut:
@@ -171,7 +196,7 @@ class ResnetBlock(nn.Module):
 
         h = self.norm2(h)
         h = nonlinearity(h)
-        h = self.dropout(h)
+        # h = self.dropout(h)
         h = self.conv2(h)
 
         if self.in_channels != self.out_channels:
@@ -234,10 +259,11 @@ class Upsample(nn.Module):
         super().__init__()
         self.with_conv = with_conv
         if self.with_conv:
-            self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+            # self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+            self.conv = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2)
 
     def forward(self, x):
-        x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
+        # x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
         if self.with_conv:
             x = self.conv(x)
         return x
@@ -249,12 +275,15 @@ class Downsample(nn.Module):
         self.with_conv = with_conv
         if self.with_conv:
             # no asymmetric padding in torch conv, must do it ourselves
-            self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
+            self.norm = Normalize(in_channels)
+            self.conv = torch.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=1)
 
     def forward(self, x):
         if self.with_conv:
-            pad = (0, 1, 0, 1)
-            x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
+            # pad = (0, 1, 0, 1)
+            # x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
+            x = self.norm(x)
+            x = nonlinearity(x)
             x = self.conv(x)
         else:
             x = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
@@ -297,7 +326,9 @@ class SimpleEncoder(nn.Module):
             attn = nn.ModuleList()
             block_in = ch * in_ch_mult[i_level]
             block_out = ch * ch_mult[i_level]
-            for i_block in range(self.num_res_blocks):
+            down = nn.Module()
+            down.downsample = Downsample(block_in, resamp_with_conv)
+            for i_block in range(self.num_res_blocks[i_level]):
                 block.append(
                     ResnetBlock(
                         in_channels=block_in, out_channels=block_out, temb_channels=self.temb_ch, dropout=dropout
@@ -306,10 +337,8 @@ class SimpleEncoder(nn.Module):
                 block_in = block_out
                 if curr_res in attn_resolutions:
                     attn.append(AttnBlock(block_in))
-            down = nn.Module()
             down.block = block
             down.attn = attn
-            down.downsample = Downsample(block_in, resamp_with_conv)
             curr_res = curr_res // 2
             self.down.append(down)
 
@@ -322,12 +351,12 @@ class SimpleEncoder(nn.Module):
         # downsampling
         hs = [self.conv_in(x)]
         for i_level in range(self.num_resolutions):
-            for i_block in range(self.num_res_blocks):
+            hs.append(self.down[i_level].downsample(hs[-1]))
+            for i_block in range(self.num_res_blocks[i_level]):
                 h = self.down[i_level].block[i_block](hs[-1], temb)
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
-            hs.append(self.down[i_level].downsample(hs[-1]))
 
         # middle
         h = hs[-1]
@@ -370,7 +399,10 @@ class Encoder(nn.Module):
             attn = nn.ModuleList()
             block_in = ch * in_ch_mult[i_level]
             block_out = ch * ch_mult[i_level]
-            for i_block in range(self.num_res_blocks):
+            down = nn.Module()
+            down.downsample = Downsample(block_in, resamp_with_conv)
+            curr_res = curr_res // 2
+            for i_block in range(self.num_res_blocks[i_level]):
                 block.append(
                     ResnetBlock(
                         in_channels=block_in, out_channels=block_out, temb_channels=self.temb_ch, dropout=dropout
@@ -379,12 +411,9 @@ class Encoder(nn.Module):
                 block_in = block_out
                 if curr_res in attn_resolutions:
                     attn.append(AttnBlock(block_in))
-            down = nn.Module()
             down.block = block
             down.attn = attn
-            if i_level != self.num_resolutions - 1:
-                down.downsample = Downsample(block_in, resamp_with_conv)
-                curr_res = curr_res // 2
+            # if i_level != self.num_resolutions - 1:
             self.down.append(down)
 
         # middle
@@ -413,13 +442,13 @@ class Encoder(nn.Module):
         # hs = [self.conv_in(x)]
         hs = [x]
         for i_level in range(self.num_resolutions):
-            for i_block in range(self.num_res_blocks):
+            # if i_level != self.num_resolutions - 1:
+            hs.append(self.down[i_level].downsample(hs[-1]))
+            for i_block in range(self.num_res_blocks[i_level]):
                 h = self.down[i_level].block[i_block](hs[-1], temb)
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
-            if i_level != self.num_resolutions - 1:
-                hs.append(self.down[i_level].downsample(hs[-1]))
 
         # middle
         h = hs[-1]
@@ -450,6 +479,7 @@ class SimpleDecoder(nn.Module):
         z_channels,
         give_pre_end=False,
         ch_in=None,
+        decoder_t=None,
         **ignorekwargs,
     ):
         super().__init__()
@@ -471,15 +501,20 @@ class SimpleDecoder(nn.Module):
         # z to block_in
         self.conv_in = torch.nn.Conv2d(z_channels, block_in, kernel_size=1, stride=1, padding=0)
 
-        # middle
-        self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock(
-            in_channels=block_in, out_channels=block_in, temb_channels=self.temb_ch, dropout=dropout
-        )
-        self.mid.attn_1 = AttnBlock(block_in)
-        self.mid.block_2 = ResnetBlock(
-            in_channels=block_in, out_channels=block_in, temb_channels=self.temb_ch, dropout=dropout
-        )
+        # # middle
+        # self.mid = nn.Module()
+        # self.mid.block_1 = ResnetBlock(
+        #     in_channels=block_in, out_channels=block_in, temb_channels=self.temb_ch, dropout=dropout
+        # )
+        # # self.mid.attn_1 = AttnBlock(block_in)
+        # self.mid.block_2 = ResnetBlock(
+        #     in_channels=block_in, out_channels=block_in, temb_channels=self.temb_ch, dropout=dropout
+        # )
+        # self.mid.block_3 = ResnetBlock(
+        #     in_channels=block_in, out_channels=block_in, temb_channels=self.temb_ch, dropout=dropout
+        # )
+        # self.norm_out_mid = Normalize(block_in)
+        # self.conv_out_mid = torch.nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
 
         # upsampling
         self.up = nn.ModuleList()
@@ -487,9 +522,8 @@ class SimpleDecoder(nn.Module):
             curr_res = curr_res * 2
             block = nn.ModuleList()
             attn = nn.ModuleList()
-            upsample = Upsample(block_in, resamp_with_conv)
             block_out = ch * ch_mult[i_level]
-            for i_block in range(self.num_res_blocks + 1):
+            for i_block in range(self.num_res_blocks[i_level]):
                 block.append(
                     ResnetBlock(
                         in_channels=block_in, out_channels=block_out, temb_channels=self.temb_ch, dropout=dropout
@@ -499,6 +533,7 @@ class SimpleDecoder(nn.Module):
                 if curr_res in attn_resolutions:
                     attn.append(AttnBlock(block_in))
             up = nn.Module()
+            upsample = Upsample(block_in, resamp_with_conv)
             up.block = block
             up.attn = attn
             up.upsample = upsample
@@ -508,35 +543,48 @@ class SimpleDecoder(nn.Module):
         self.norm_out = Normalize(block_in)
         self.conv_out = torch.nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
 
-        nn.init.constant_(self.conv_out.bias, -4.9)
+        self.decoder_t = decoder_t
+
+        # nn.init.constant_(self.conv_out_mid.bias, -5)
+        nn.init.constant_(self.conv_out.bias, -5.0)
         # nn.init.normal_(self.conv_out.weight, 0, 0.1)
         # nn.init.constant_(self.conv_out.bias, 0)
 
-    def forward(self, z):
+    def forward(self, z, z_t, give_pre_end=False):
         # assert z.shape[1:] == self.z_shape[1:]
         self.last_z_shape = z.shape
 
         # timestep embedding
         temb = None
 
-        h = self.conv_in(z)
+        h_t = self.decoder_t(z_t)
+        h = self.conv_in(torch.cat([z, h_t], dim=1))
+
+        # h = self.mid.block_1(h, temb)
+        # h = self.mid.block_2(h, temb)
+        # pre_end_h = self.mid.block_3(h, temb)
+        # pre_end_h = self.norm_out_mid(pre_end_h)
+        # pre_end_h = nonlinearity(pre_end_h)
+        # pre_end_h = self.conv_out_mid(pre_end_h)
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
-            h = self.up[i_level].upsample(h)
-            for i_block in range(self.num_res_blocks + 1):
+            for i_block in range(self.num_res_blocks[i_level]):
                 h = self.up[i_level].block[i_block](h, temb)
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
+            # if i_level != 0:
+            h = self.up[i_level].upsample(h)
 
         # end
-        if self.give_pre_end:
+        if self.give_pre_end or give_pre_end:
             return h
+        pre_end_h = h
 
         h = self.norm_out(h)
         h = nonlinearity(h)
         h = self.conv_out(h)
-        return h
+        return h, pre_end_h
 
 
 class Decoder(nn.Module):
@@ -568,7 +616,8 @@ class Decoder(nn.Module):
         # compute in_ch_mult, block_in and curr_res at lowest res
         in_ch_mult = (ch_mult[0],) + tuple(ch_mult)
         block_in = ch * ch_mult[self.num_resolutions - 1]
-        curr_res = resolution // 2 ** (self.num_resolutions - 1)
+        # curr_res = resolution // 2 ** (self.num_resolutions - 1)
+        curr_res = 32
         self.z_shape = (1, z_channels, curr_res, curr_res)
         print("Working with z of shape {} = {} dimensions.".format(self.z_shape, np.prod(self.z_shape)))
 
@@ -591,7 +640,7 @@ class Decoder(nn.Module):
             block = nn.ModuleList()
             attn = nn.ModuleList()
             block_out = ch * ch_mult[i_level]
-            for i_block in range(self.num_res_blocks + 1):
+            for i_block in range(self.num_res_blocks[i_level]):
                 block.append(
                     ResnetBlock(
                         in_channels=block_in, out_channels=block_out, temb_channels=self.temb_ch, dropout=dropout
@@ -603,9 +652,9 @@ class Decoder(nn.Module):
             up = nn.Module()
             up.block = block
             up.attn = attn
-            if i_level != 0:
-                up.upsample = Upsample(block_in, resamp_with_conv)
-                curr_res = curr_res * 2
+            # if i_level != 0:
+            up.upsample = Upsample(block_in, resamp_with_conv)
+            curr_res = curr_res * 2
             self.up.insert(0, up)  # prepend to get consistent order
 
         # end
@@ -633,12 +682,11 @@ class Decoder(nn.Module):
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
-            for i_block in range(self.num_res_blocks + 1):
+            for i_block in range(self.num_res_blocks[i_level]):
                 h = self.up[i_level].block[i_block](h, temb)
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
-            if i_level != 0:
-                h = self.up[i_level].upsample(h)
+            h = self.up[i_level].upsample(h)
 
         # end
         if self.give_pre_end:
@@ -693,8 +741,9 @@ class VectorQuantizer(nn.Module):
 
         self.register_buffer("code_age", torch.zeros(self.n_e) * 10000)
         self.register_buffer("code_usage", torch.zeros(self.n_e))
-        self.register_buffer("data_initialized", torch.zeros(1))
-        self.register_buffer("reservoir", torch.zeros(self.n_e * 10, e_dim))
+        self.register_buffer("data_initialized", torch.ones(1))
+        # self.register_buffer("reservoir", torch.zeros(self.n_e * 10, e_dim))
+        self.reservoir = torch.zeros(self.n_e * 10, e_dim)
 
     def remap_to_used(self, inds):
         ishape = inds.shape
@@ -728,19 +777,19 @@ class VectorQuantizer(nn.Module):
         z = rearrange(z, "b c h w -> b h w c").contiguous()
         z_flattened = z.view(-1, self.e_dim)
         # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
-        if self.embedding.weight.requires_grad and use_vq and self.training:
-            self.update_reservoir(z_flattened.detach())
+        # if self.embedding.weight.requires_grad and use_vq and self.training:
+        #     self.update_reservoir(z_flattened.detach())
 
-        # if use_vq:
+        # if self.embedding.weight.requires_grad and use_vq:
         #     self.update_codebook(z_flattened, force_update=self.data_initialized.item() == 0)
 
         # z_flattened = LazyTensor(z_flattened[:, None, :])
         # all_zq = LazyTensor(self.embedding.weight / self.embedding.weight.norm(dim=-1, keepdim=True)[None, :, :].clamp(1e-7))
         # min_encoding_indices = (z_flattened | all_zq).argmax(dim=1).long().view(-1)
-        topk_nn = generic_argkmin("SqDist(X,Y)", "a = Vi(1)", "X = Vi(1024)", "Y = Vj(1024)")
-        min_encoding_indices = topk_nn(
-            z_flattened, self.embedding.weight / self.embedding.weight.norm(dim=-1, keepdim=True)
-        ).squeeze()
+        # if z_flattened.shape[-1] == 1024:
+        # else:
+        topk_nn = generic_argkmin("SqDist(X,Y)", "a = Vi(1)", f"X = Vi({self.e_dim})", f"Y = Vj({self.e_dim})")
+        min_encoding_indices = topk_nn(z_flattened, self.embedding.weight).squeeze()
 
         # min_encoding_indices = torch.argmin(d, dim=1)
         z_q = self.embedding(min_encoding_indices).view(z.shape)
@@ -808,9 +857,9 @@ class VectorQuantizer(nn.Module):
         if sample:
             rp = torch.randperm(z_flattened.size(0))
             num_sample = self.reservoir.shape[0] // 100
-            self.reservoir = torch.cat([self.reservoir[num_sample:], z_flattened[rp[:num_sample]]])
+            self.reservoir = torch.cat([self.reservoir[num_sample:].cpu(), z_flattened[rp[:num_sample]].cpu()])
         else:
-            self.reservoir = torch.cat([self.reservoir[z_flattened.shape[0] :], z_flattened])
+            self.reservoir = torch.cat([self.reservoir[z_flattened.shape[0] :].cpu(), z_flattened.cpu()])
 
     def update_codebook(self, z_flattened, force_update=False):
 
@@ -818,13 +867,7 @@ class VectorQuantizer(nn.Module):
         dead_code_num = torch.tensor(self.embedding.weight.shape[0])
         if (self.training and (self.code_age >= self.dead_limit).sum() > self.n_e * 0.7) or force_update:
             if dead_code_num > 0:
-                all_z = torch.cat(
-                    [
-                        self.reservoir,
-                        self.embedding.weight[self.code_age < self.dead_limit]
-                        / self.embedding.weight[self.code_age < self.dead_limit].norm(dim=-1, keepdim=True).clamp(1e-7),
-                    ]
-                )
+                all_z = torch.cat([self.reservoir, self.embedding.weight[self.code_age < self.dead_limit].data.cpu()])
                 if dist.rank() == 0:
                     print("running kmeans!!", dead_code_num.item())  # data driven initialization for the embeddings
                     best_dist = 1e10
@@ -833,10 +876,7 @@ class VectorQuantizer(nn.Module):
                         rp = torch.randperm(all_z.size(0))
                         init = torch.cat(
                             [
-                                self.embedding.weight[self.code_age < self.dead_limit]
-                                / self.embedding.weight[self.code_age < self.dead_limit]
-                                .norm(dim=-1, keepdim=True)
-                                .clamp(1e-7),
+                                self.embedding.weight[self.code_age < self.dead_limit].data.cpu(),
                                 all_z[rp][: (dead_code_num - (self.code_age < self.dead_limit).sum())],
                             ]
                         )
@@ -873,6 +913,46 @@ class VectorQuantizer(nn.Module):
             # self.code_age[self.code_age >= self.dead_limit] = 0
             self.code_age.fill_(0)
 
+    # def update_codebook(self, z_flattened, force_update=False):
+
+    #     dead_code_num = (self.code_age >= self.dead_limit).sum()
+    #     if (self.training and dead_code_num > self.n_e * 0.3) or force_update:
+    #         print("running kmeans!!", dead_code_num.item())  # data driven initialization for the embeddings
+    #         if dead_code_num > 0:
+    #             all_z = dist.allgather(z_flattened)
+    #             if dist.rank() == 0:
+    #                 all_z = torch.cat([all_z, self.embedding.weight[self.code_age < self.dead_limit].to(all_z.device)])
+    #                 rp = torch.randperm(all_z.size(0))
+    #                 kd = kmeans2(all_z[rp[:20000]].data.cpu().numpy(), dead_code_num.item(), minit="points")
+    #                 self.embedding.weight.data[self.code_age >= self.dead_limit] = torch.from_numpy(kd[0]).to(
+    #                     self.embedding.weight.device
+    #                 )
+    #                 # print()
+    #                 # live_code = self.embedding.weight[self.code_age < self.dead_limit]
+
+    #                 # new_code = live_code[torch.multinomial(self.code_usage[self.code_age < self.dead_limit], dead_code_num, replacement=True)]
+    #                 # new_code = new_code + new_code.uniform_(-0.001, 0.001) * new_code
+    #                 # self.embedding.weight.data[self.code_age >= self.dead_limit] = new_code
+
+    #                 # # mean, std = live_code.mean(dim=0), live_code.std(dim=0)
+    #                 # # a = live_code.min(dim=0)[0]
+    #                 # # b = live_code.max(dim=0)[0]
+    #                 # # self.embedding.weight.data[self.code_age >= self.dead_limit] = (
+    #                 # #     self.embedding.weight.data[self.code_age >= self.dead_limit].uniform_(0, 1) * (b - a) + a
+    #                 # # )
+    #                 # # self.embedding.weight.data[self.code_age >= self.dead_limit] = self.embedding.weight.data[
+    #                 # #     self.code_age >= self.dead_limit
+    #                 # # ].mul_(std)
+    #                 # # self.embedding.weight.data[self.code_age >= self.dead_limit] = self.embedding.weight.data[
+    #                 # #     self.code_age >= self.dead_limit
+    #                 # # ].add_(mean)
+
+    #         if force_update:
+    #             self.data_initialized.fill_(1)
+
+    #         dist.broadcast(self.embedding.weight, src=0)
+    #         self.code_age[self.code_age >= self.dead_limit] = 0
+
 
 class LPIPS(nn.Module):
     # Learned perceptual metric
@@ -880,28 +960,33 @@ class LPIPS(nn.Module):
         super().__init__()
         cfg = setup_config(Path(__file__).parent.parent / "configs", "two_stage_v1.1_512beam")
         self.model = TwoStage(cfg.perception_model)
+        # cfg = setup_config(Path(__file__).parent.parent / "configs", "two_stage_detr_v1.1_512beam")
+        # self.model = TwoStageDETR(cfg.perception_model)
         self.load_from_pretrained()
         for param in self.parameters():
             param.requires_grad = False
 
     def load_from_pretrained(self, name="vgg_lpips"):
         ckpt = torch.load(
-            "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/two_stage_v1.1_2022-08-26_21-16-35_v5data_1sweep/checkpoint/model_00025e.pth.tar",
+            "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/two_stage_v1.1_2022-09-24_03-26-17_v5_1sweep_zh_bottom_box/checkpoint/model_00025e.pth.tar",
+            # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/two_stage_v1.1_2022-09-23_01-33-59_3d_new_voxel_dense/checkpoint/model_00024e.pth.tar",
+            # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/two_stage_v1.1_2022-09-22_03-40-04_3d_new_voxel/checkpoint/model_00024e.pth.tar",
+            # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/two_stage_detr_v1.1_2022-09-16_16-05-17/checkpoint/model_00024e.pth.tar",
+            # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/two_stage_v1.1_2022-08-26_21-16-35_v5data_1sweep/checkpoint/model_00025e.pth.tar",
             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_july/two_stage_v1.1_2022-08-26_01-05-55_v2data_1sweep/checkpoint/model_0021e.pth.tar",
             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_july/two_stage_v1.1_2022-08-23_22-24-04_v3data/checkpoint/model_00025e.pth.tar",
             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_july/two_stage_v1.1_2022-07-13_23-45-59/checkpoint/model_0025e.pth.tar",
             map_location=torch.device("cpu"),
         )["model"]
 
-        print(self.model.load_state_dict(ckpt, strict=False))
+        print(self.model.load_state_dict(ckpt, strict=True))
 
     def forward(self, input, batched_frames, bev_range, input_ori=None):
         self.eval()
-
         fm = self.model.neck(self.model.backbone(VoxelizerOutput(input)))
         header_out = self.model.forward_header(fm.float(), bev_range)
-
         det_output = self.model.det_post_process(fm, header_out, postprocess=False)
+        # det_out = self.model.head(fm, bev_range=bev_range)
 
         gt = gt_from_label(
             batched_frames.labels if not use_pair_label else batched_frames.pair_labels,
@@ -910,6 +995,7 @@ class LPIPS(nn.Module):
         )
 
         total_loss, metas = self.model.det_loss(det_output.det_outs, gt)
+        # total_loss, metas = self.model.loss(det_out, batched_frames.labels if not use_pair_label else batched_frames.pair_labels, bev_range=bev_range)
 
         metas["detection_loss"] = total_loss.item()
         metas["total_loss"] = total_loss.item()
@@ -918,6 +1004,7 @@ class LPIPS(nn.Module):
             with torch.no_grad():
                 target_fm = self.model.neck(self.model.backbone(VoxelizerOutput(input_ori)))
             feat_loss = F.smooth_l1_loss(fm, target_fm) * 5
+            # feat_loss = sum([F.smooth_l1_loss(x, y) * 2 for x, y in zip(fm, target_fm)])
             metas["det/0/feat_loss"] = feat_loss.item()
             total_loss = (total_loss, feat_loss)
 
@@ -1030,9 +1117,10 @@ def adopt_weight(weight, global_step, threshold=0, value=0.0):
 
 def subsample_lidar(batched_lidar, global_step):
 
-    step_sizes = [2000, 19500, 37000, 55500]
+    # step_sizes = [2000, 19500, 37000, 55500]
     # step_sizes = [2000, 19500, 37000, 74000]
     # step_sizes = [0, 1000, 2000, 3000]
+    step_sizes = [0, 5000, 10000, 15000]
     stride = 1
     if global_step >= step_sizes[-1]:
         num_beam = 64
@@ -1166,6 +1254,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         batched_frames=None,
         bev_range=None,
         sparse_x=None,
+        xrec_t=None,
+        x_t=None,
     ):
 
         meta = {}
@@ -1173,7 +1263,12 @@ class VQLPIPSWithDiscriminator(nn.Module):
         rec_coeff = 1
         reconstructions = reconstructions * rec_coeff
         # rec_loss = inverse_sigmoid_focal_loss(reconstructions, inputs, alpha=-1, reduction="mean") * 10
-        rec_loss = F.binary_cross_entropy_with_logits(reconstructions, inputs, reduction="mean") * 10
+        # rec_loss = F.binary_cross_entropy_with_logits(reconstructions, inputs, reduction="mean") * 10
+        smoothed_inputs = inputs.clone()
+        # smoothed_inputs *= 0.995
+        # smoothed_inputs[smoothed_inputs < 0.5] += 0.005
+        rec_loss = F.binary_cross_entropy_with_logits(reconstructions, smoothed_inputs, reduction="mean") * 10
+        # rec_loss_t = F.binary_cross_entropy_with_logits(xrec_t, x_t, reduction="mean") * 10
         # rec_loss = F.binary_cross_entropy_with_logits(reconstructions, inputs, reduction="none").reshape((-1)).topk(int(reconstructions.numel() * 0.9999), largest=False)[0].mean() * 10
         # reconstructions = gumbel_sigmoid(reconstructions + (0 if sparse_x is None else sparse_x * 10), hard=True)
         reconstructions = (reconstructions + (0 if sparse_x is None else sparse_x * 20)).sigmoid()
@@ -1189,22 +1284,23 @@ class VQLPIPSWithDiscriminator(nn.Module):
                 / ((reconstructions >= 0.5) | (inputs == 1)).sum().item(),
                 "det/0/quant_loss": codebook_loss.detach().mean().item(),
                 "det/0/rec_loss": rec_loss.detach().mean().item(),
+                # "det/0/rec_loss_t": rec_loss_t.detach().mean().item(),
             }
         )
 
         if self.perceptual_weight > 0 and (optimizer_idx == 0 or (optimizer_idx == 1 and self.training)):
             p_loss, p_loss_meta = self.perceptual_loss(reconstructions, batched_frames, bev_range, inputs)
-
+            # p_weight = 0.1
             try:
-                p_weight = self.calculate_adaptive_weight(rec_loss, p_loss[0], last_layer=last_layer).item()
-                # p_weight = torch.tensor(0.01, device=reconstructions.device)
+                # p_weight = self.calculate_adaptive_weight(rec_loss, p_loss[0], last_layer=last_layer).item()
+                p_weight = torch.tensor(0.03, device=reconstructions.device)
             except RuntimeError:
                 assert not self.training
                 p_weight = torch.tensor(1.0, device=reconstructions.device).item()
             # p_weight = p_weight * min(global_step / 50000, 1)
             # p_weight = p_weight * 5
             # p_weight = max(p_weight, 2.0)
-            nll_loss = rec_loss + self.perceptual_weight * p_loss[0] * p_weight + p_loss[1]
+            nll_loss = rec_loss + self.perceptual_weight * p_weight * p_loss[0] + p_loss[1]
             meta.update({"det/0/p_loss": sum(p_loss).detach().mean().item()})
             meta.update({"det/0/p_weight": p_weight})
             meta.update(p_loss_meta)
@@ -1216,6 +1312,8 @@ class VQLPIPSWithDiscriminator(nn.Module):
         loss = nll_loss
         if (global_step >= 2000 or not novq_in_first2000) and use_vq:
             loss = nll_loss + self.codebook_weight * codebook_loss.mean()
+
+        # loss = loss + rec_loss_t
 
         # if optimizer_idx == 1:
         #     logits_fake = self.discriminator(reconstructions.contiguous())
@@ -1330,17 +1428,17 @@ class VQGAN(nn.Module):
         self.in_chans = 40
         z_channels = embed_dim
         hidden_dim = 128
-        self.resolution = 256
+        self.resolution = 512
         self.encoder_b = SimpleEncoder(
             double_z=False,
             z_channels=z_channels,
-            resolution=256,
+            resolution=self.resolution,
             in_channels=self.in_chans,
             out_ch=self.in_chans,
             ch=hidden_dim,
             ch_mult=[1, 2],
             # ch_mult=[1, 2, 2, 4],
-            num_res_blocks=2,
+            num_res_blocks=[1, 2],
             attn_resolutions=[32],
             # attn_resolutions=[32],
             dropout=0.0,
@@ -1348,14 +1446,14 @@ class VQGAN(nn.Module):
         self.encoder_t = Encoder(
             double_z=False,
             z_channels=z_channels,
-            resolution=256 // 4,
+            resolution=self.resolution // 4,
             in_channels=hidden_dim * 2,
             out_ch=hidden_dim * 2,
             ch=hidden_dim,
-            ch_mult=[2, 2, 4],
+            ch_mult=[2, 4],
             # ch_mult=[1, 2, 2, 4],
-            num_res_blocks=3,
-            attn_resolutions=[16],
+            num_res_blocks=[2, 2],
+            attn_resolutions=[32],
             # attn_resolutions=[32],
             dropout=0.0,
         )
@@ -1375,49 +1473,61 @@ class VQGAN(nn.Module):
         #     dropout=0.0,
         # )
 
-        self.decoder_t = Decoder(
+        decoder_t = Decoder(
             double_z=False,
             z_channels=z_channels,
-            resolution=256 // 4,
+            resolution=self.resolution // 4,
             in_channels=hidden_dim * 2,
             out_ch=hidden_dim * 2,
             ch=hidden_dim,
-            ch_mult=[2, 2, 4],
+            ch_mult=[2, 4],
             # ch_mult=[1, 2, 2, 4],
-            num_res_blocks=3,
-            # attn_resolutions=[16],
+            num_res_blocks=[2, 2],
             attn_resolutions=[32],
+            # attn_resolutions=[32],
             dropout=0.0,
             give_pre_end=True,
         )
 
         self.decoder = SimpleDecoder(
             double_z=False,
-            z_channels=z_channels * 2,
-            resolution=256,
+            z_channels=embed_dim + hidden_dim * 2,
+            resolution=self.resolution,
             in_channels=self.in_chans,
             out_ch=self.in_chans,
             ch=hidden_dim,
             ch_mult=[1, 2],
             # ch_in=hidden_dim * 2 + embed_dim,
             # ch_mult=[1, 2, 2, 4],
-            num_res_blocks=2,
+            num_res_blocks=[1, 2],
             attn_resolutions=[32],
             # attn_resolutions=[32],
             dropout=0.0,
+            decoder_t=copy.deepcopy(decoder_t),
         )
 
         # import ipdb; ipdb.set_trace()
 
-        self.upsample_t = nn.ConvTranspose2d(embed_dim, embed_dim, 8, stride=4, padding=2)
+        # self.upsample_t = nn.ConvTranspose2d(embed_dim, embed_dim, 8, stride=4, padding=2)
+        self.upsample_t = nn.Sequential(
+            nn.ConvTranspose2d(embed_dim, embed_dim // 2, kernel_size=2, stride=2),
+            LayerNorm(embed_dim // 2),
+            nn.GELU(),
+            nn.ConvTranspose2d(embed_dim // 2, embed_dim // 4, kernel_size=2, stride=2),
+        )
+        # self.decoder_proj = nn.Sequential(
+        #     nn.Conv2d(2048, 128, 1),
+        #     nn.BatchNorm2d(128),
+        #     nn.ReLU(inplace=True),
+        # )
 
         # self.loss = VQLPIPSWithDiscriminator(
         #     disc_conditional=False,
         #     disc_in_channels=self.in_chans,
-        #     disc_start=36100,
+        #     disc_start=500000,
         #     disc_weight=1.0,
         #     codebook_weight=10.0,
-        #     perceptual_weight=0.5,
+        #     perceptual_weight=0.0,
         #     disc_num_layers=3,
         #     disc_ndf=64,
         # )
@@ -1425,9 +1535,9 @@ class VQGAN(nn.Module):
         self.quantize_b = VectorQuantizer(
             n_embed, embed_dim, beta=0.25, remap=remap, sane_index_shape=sane_index_shape, legacy=True
         )
-        self.quant_conv_b = torch.nn.Conv2d(hidden_dim * 2 + hidden_dim * 2, embed_dim, 1)
+        self.quant_conv_b = torch.nn.Conv2d(hidden_dim * 2 + embed_dim // 4, embed_dim, 1)
 
-        self.post_quant_conv_b = torch.nn.Conv2d(embed_dim, z_channels, 1)
+        self.post_quant_conv_b = torch.nn.Conv2d(embed_dim, embed_dim, 1)
 
         self.quantize_t = VectorQuantizer(
             n_embed // 2, embed_dim, beta=0.25, remap=remap, sane_index_shape=sane_index_shape, legacy=True
@@ -1436,6 +1546,9 @@ class VQGAN(nn.Module):
         self.post_quant_conv_t = torch.nn.Conv2d(embed_dim, z_channels, 1)
 
         # self.voxelizer = Voxelizer(kwargs["cfg"].voxel_cfg)
+        # voxel_cfg = copy.deepcopy(kwargs["cfg"].voxel_cfg)
+        # voxel_cfg.step *= 4
+        # self.voxelizer_t = Voxelizer(voxel_cfg)
         # self.aug = kornia.augmentation.RandomCrop((self.resolution, self.resolution), resample=kornia.Resample.NEAREST)
         # if train_sparse:
         #     self.scale = torch.nn.parameter.Parameter(torch.zeros((1,)), requires_grad=True)
@@ -1451,6 +1564,19 @@ class VQGAN(nn.Module):
         #     torch.nn.Linear(z_channels, n_embed),
         # )
 
+        # for p in self.quantize_b.parameters():
+        #     p.requires_grad = False
+        # for p in self.quantize_t.parameters():
+        #     p.requires_grad = False
+
+        # for p in self.post_quant_conv_t.parameters():
+        #     p.requires_grad = False
+        # for p in self.post_quant_conv_b.parameters():
+        #     p.requires_grad = False
+        # # for p in self.upsample_t.parameters():
+        # #     p.requires_grad = False
+        # for p in self.decoder.parameters():
+        #     p.requires_grad = False
         # for p in self.parameters():
         #     p.requires_grad = False
 
@@ -1462,14 +1588,11 @@ class VQGAN(nn.Module):
 
         # for p in self.sparse_code_idx_cls.parameters():
         #     p.requires_grad = True
+        print(self)
 
     def encode(self, x, global_step=100000000):
         enc_b = self.encoder_b(x)
         enc_t = self.encoder_t(enc_b)
-
-        # feat = self.encoder(VoxelizerOutput(x))
-        # enc_b, enc_t = feat[0], feat[2]
-
         h_t = self.quant_conv_t(enc_t)
         # h_t = h_t / h_t.norm(dim=1, keepdim=True).clamp(1e-7)
         if global_step == 2000 and novq_in_first2000:
@@ -1478,18 +1601,23 @@ class VQGAN(nn.Module):
         if (global_step < 2000 and novq_in_first2000) or not use_vq:
             quant_t = h_t
 
-        dec_t = self.decoder_t(quant_t)
-        enc_b = torch.cat([dec_t, enc_b], dim=1)
+        # dec_t = self.decoder_t(quant_t)
+        dec_t = self.upsample_t(quant_t)
+        if global_step < 2000:
+            enc_b = torch.cat([dec_t, torch.zeros_like(enc_b)], dim=1)
+        else:
+            enc_b = torch.cat([dec_t, enc_b * min(1.0, (global_step - 2000) / 10000)], dim=1)
 
         h_b = self.quant_conv_b(enc_b)
         # h_b = h_b / h_b.norm(dim=1, keepdim=True).clamp(1e-7)
         if global_step == 2000 and novq_in_first2000:
             self.quantize_b.data_initialized.fill_(0)
+        # import ipdb; ipdb.set_trace()
         quant_b, emb_loss_2, info_2 = self.quantize_b(h_b)
         if (global_step < 2000 and novq_in_first2000) or not use_vq:
             quant_b = h_b
 
-        return quant_t, quant_b, emb_loss_1 + emb_loss_2, info_1
+        return quant_t, quant_b, emb_loss_1 + emb_loss_2, (info_1, info_2), h_t, h_b
 
     def encode_sparse(self, x):
         pre_h = self.sparse_encoder(x)
@@ -1497,13 +1625,13 @@ class VQGAN(nn.Module):
         quant, emb_loss, info = self.quantize(h)
         return quant, emb_loss, info, h, pre_h
 
-    def decode(self, quant_t, quant_b):
+    def decode(self, quant_t, quant_b, give_pre_end=False):
         quant_t = self.post_quant_conv_t(quant_t)
         quant_b = self.post_quant_conv_b(quant_b)
-        quant_t = self.upsample_t(quant_t)
-        quant = torch.cat([quant_t, quant_b], dim=1)
-        dec = self.decoder(quant)
-        return dec
+        # quant_t = self.upsample_t(quant_t)
+        # quant = torch.cat([quant_t, quant_b], dim=1)
+        dec = self.decoder(quant_b, quant_t, give_pre_end)
+        return dec  # , self.decoder_proj(quant)
 
     def decode_code(self, code_b, shape=None):
         quant_b = self.quantize.get_codebook_entry(code_b, shape)
@@ -1511,9 +1639,9 @@ class VQGAN(nn.Module):
         return dec
 
     def forward(self, input):
-        quant_t, quant_b, diff, _ = self.encode(input)
+        quant_t, quant_b, diff, _, _, _ = self.encode(input)
         dec = self.decode(quant_t, quant_b)
-        return dec, diff
+        return dec
 
     def get_input(self, batch, k):
         x = batch[k]
@@ -1559,33 +1687,51 @@ class VQGAN(nn.Module):
     #             batched_lidar, num_beam = subsample_lidar(
     #                 batched_lidar, global_step=global_step if curriculum else 10000000
     #             )
+    #         for p in batched_lidar:
+    #             p[0][:, 2] += 0.4
+    #             p[1][:, 2] += 0.4
     #         bev = self.voxelizer(batched_lidar)
     #     else:
-    #         bev = self.voxelizer(model_input.batched_lidar)
+    #         batched_lidar = update_lidar(model_input.batched_lidar)
+    #         for p in batched_lidar:
+    #             p[0][:, 2] += 0.4
+    #             p[1][:, 2] += 0.4
+    #         bev = self.voxelizer(batched_lidar)
 
-    #     x = self.aug(bev.voxel_features)
+    #     # x = self.aug(bev.voxel_features)
 
-    #     crop_range = self.aug._params["src"].clone()
-    #     x_min, y_max = crop_range[:, 0].chunk(2, dim=1)
-    #     x_min = x_min * self.voxelizer.step + self.voxelizer.x_min
-    #     y_max = self.voxelizer.y_max - y_max * self.voxelizer.step
-    #     x_max = x_min + self.resolution * self.voxelizer.step
-    #     y_min = y_max - self.resolution * self.voxelizer.step
-    #     bev_range = torch.cat([x_min, x_max, y_min, y_max], dim=-1).to(x.device)
+    #     # crop_range = self.aug._params["src"].clone()
+    #     # x_min, y_max = crop_range[:, 0].chunk(2, dim=1)
+    #     # x_min = x_min * self.voxelizer.step + self.voxelizer.x_min
+    #     # y_max = self.voxelizer.y_max - y_max * self.voxelizer.step
+    #     # x_max = x_min + self.resolution * self.voxelizer.step
+    #     # y_min = y_max - self.resolution * self.voxelizer.step
+    #     # bev_range = torch.cat([x_min, x_max, y_min, y_max], dim=-1).to(x.device)
+    #     # bev_range = (0, 70, -35, 35)
+    #     bev_range = None
+    #     x = bev.voxel_features
+    #     # x_t = self.voxelizer_t(batched_lidar).voxel_features.chunk(2, dim=1)[0]
 
     #     if train_sparse:
 
     #         x, sparse_x = x.chunk(2, dim=1)
 
-    #         quant_t, quant_b, qloss, qinfo = self.encode(sparse_x, global_step)
-    #         xrec = self.decode(quant_t, quant_b)
+    #         quant_t, quant_b, qloss, qinfo, h_t, h_b = self.encode(sparse_x, global_step)
+    #         # (xrec, _), xrec_feat = self.decode(quant_t, quant_b)
+    #         xrec, xrec_t = self.decode(quant_t, quant_b)
+    #         # xrec_feat_cont = self.decode(h_t, h_b, give_pre_end=True)
+    #         # # xrec_feat_diff_loss = (((xrec_feat - xrec_feat_cont) ** 2) * 10).mean()
+    #         # xrec_feat_diff_loss = (xrec_feat - xrec_feat_cont).norm(dim=1).mean()
 
     #         metas = {}
     #         metas.update(
     #             {
-    #                 "det/0/q_util": qinfo[3].detach().item(),
-    #                 "det/0/q_age": qinfo[4].detach().item(),
+    #                 "det/0/q_t_util": qinfo[0][3].detach().item(),
+    #                 "det/0/q_t_age": qinfo[0][4].detach().item(),
+    #                 "det/0/q_util": qinfo[1][3].detach().item(),
+    #                 "det/0/q_age": qinfo[1][4].detach().item(),
     #                 "det/0/num_beam": num_beam if subsample else 64,
+    #                 # "det/0/rec_feat_diff": xrec_feat_diff_loss.detach().item(),
     #             }
     #         )
 
@@ -1599,19 +1745,25 @@ class VQGAN(nn.Module):
     #             batched_frames=batched_frames,
     #             bev_range=bev_range,
     #             sparse_x=sparse_x,
+    #             # xrec_feat=xrec_feat,
     #         )
+    #         # loss = loss + xrec_feat_diff_loss
 
     #         metas.update(log_dict)
 
     #     else:
-    #         quant_t, quant_b, qloss, qinfo = self.encode(x, global_step)
-    #         xrec = self.decode(quant_t, quant_b)
+    #         x, sparse_x = x.chunk(2, dim=1)
+
+    #         quant_t, quant_b, qloss, qinfo, h_t, h_b = self.encode(x, global_step)
+    #         xrec, xrec_t = self.decode(quant_t, quant_b)
 
     #         metas = {}
     #         metas.update(
     #             {
-    #                 "det/0/q_util": qinfo[3].detach().item(),
-    #                 "det/0/q_age": qinfo[4].detach().item(),
+    #                 "det/0/q_t_util": qinfo[0][3].detach().item(),
+    #                 "det/0/q_t_age": qinfo[0][4].detach().item(),
+    #                 "det/0/q_util": qinfo[1][3].detach().item(),
+    #                 "det/0/q_age": qinfo[1][4].detach().item(),
     #             }
     #         )
 
@@ -1624,6 +1776,8 @@ class VQGAN(nn.Module):
     #             last_layer=self.get_last_layer(),
     #             batched_frames=batched_frames,
     #             bev_range=bev_range,
+    #             # xrec_t=xrec_t,
+    #             # x_t=x_t,
     #         )
 
     #         metas.update(log_dict)
@@ -1648,17 +1802,30 @@ class VQGAN(nn.Module):
     #             batched_lidar, num_beam = subsample_lidar(
     #                 batched_lidar, global_step=global_step if curriculum else 10000000
     #             )
+    #         for p in batched_lidar:
+    #             p[0][:, 2] += 0.4
+    #             p[1][:, 2] += 0.4
     #         bev = model.voxelizer(batched_lidar)
     #     else:
-    #         bev = model.voxelizer(model_input.batched_lidar)
+    #         batched_lidar = update_lidar(model_input.batched_lidar)
+    #         for p in batched_lidar:
+    #             p[0][:, 2] += 0.4
+    #             p[1][:, 2] += 0.4
+    #         bev = model.voxelizer(batched_lidar)
 
     #     x = bev.voxel_features
+    #     # x_t = model.voxelizer_t(batched_lidar).voxel_features.chunk(2, dim=1)[0]
 
     #     if train_sparse:
     #         x, sparse_x = x.chunk(2, dim=1)
 
-    #         quant_t, quant_b, qloss, qinfo = model.encode(sparse_x, global_step=global_step)
-    #         xrec = model.decode(quant_t, quant_b)
+    #         quant_t, quant_b, qloss, qinfo, h_t, h_b = model.encode(sparse_x, global_step=global_step)
+    #         # xrec = model.decode(quant_t, quant_b)
+    #         # (xrec, _), xrec_feat = model.decode(quant_t, quant_b)
+    #         xrec, xrec_t = model.decode(quant_t, quant_b)
+    #         # xrec_feat_cont = model.decode(h_t, h_b, give_pre_end=True)
+    #         # # xrec_feat_diff_loss = (((xrec_feat - xrec_feat_cont) ** 2) * 10).mean()
+    #         # xrec_feat_diff_loss = (xrec_feat - xrec_feat_cont).norm(dim=1).mean()
 
     #         metas = {}
     #         metas.update(
@@ -1666,17 +1833,21 @@ class VQGAN(nn.Module):
     #                 "det/0/q_util": qinfo[3].detach(),
     #                 "det/0/q_age": qinfo[4].detach(),
     #                 "det/0/num_beam": num_beam if subsample else 64,
+    #                 # "det/0/rec_feat_diff": xrec_feat_diff_loss.detach().item(),
     #             }
     #         )
     #     else:
+    #         x, sparse_x = x.chunk(2, dim=1)
 
-    #         quant_t, quant_b, qloss, qinfo = model.encode(x)
-    #         xrec = model.decode(quant_t, quant_b)
+    #         quant_t, quant_b, qloss, qinfo, h_t, h_b = model.encode(x, global_step=global_step)
+    #         xrec, xrec_t = model.decode(quant_t, quant_b)
     #         metas = {}
     #         metas.update(
     #             {
-    #                 "det/0/q_util": qinfo[3].detach(),
-    #                 "det/0/q_age": qinfo[4].detach(),
+    #                 "det/0/q_t_util": qinfo[0][3].detach().item(),
+    #                 "det/0/q_t_age": qinfo[0][4].detach().item(),
+    #                 "det/0/q_util": qinfo[1][3].detach().item(),
+    #                 "det/0/q_age": qinfo[1][4].detach().item(),
     #             }
     #         )
 
@@ -1690,6 +1861,9 @@ class VQGAN(nn.Module):
     #         batched_frames=batched_frames,
     #         bev_range=None,
     #         sparse_x=None if not train_sparse else sparse_x,
+    #         # xrec_feat=xrec_feat,
+    #         # xrec_t=xrec_t,
+    #         # x_t=x_t,
     #     )
 
     #     metas.update(log_dict_ae)
@@ -1705,8 +1879,36 @@ class VQGAN(nn.Module):
     #             VoxelizerOutput((xrec + (0 if not train_sparse else sparse_x * 20)).sigmoid())
     #         )
     #     )
+    #     # fm = xrec_feat
     #     header_out = model.loss.perceptual_loss.model.forward_header(fm.float())
     #     det_output = model.loss.perceptual_loss.model.det_post_process(fm, header_out, True)
+    #     # det_out = model.loss.perceptual_loss.model.head(fm)
+
+    #     # pred_scores = det_out["all_cls_scores"].sigmoid().mean(dim=0)
+    #     # bboxes, _, _ = detr_det_postprocess(
+    #     #     {
+    #     #         "pred_logits": inverse_sigmoid(pred_scores),
+    #     #         "pred_boxes": det_out["all_bbox_preds"][-1],
+    #     #     },
+    #     #     model.loss.perceptual_loss.model.active_classes,
+    #     #     model.loss.perceptual_loss.model.score_threshold,
+    #     #     nms_threshold=model.loss.perceptual_loss.model.nms_threshold,
+    #     #     nms_topk=model.loss.perceptual_loss.model.nms_topk,
+    #     # )
+
+    #     # det_output = DetectionModelOutput(
+    #     #     bboxes=bboxes,
+    #     #     tracks=None,
+    #     #     preds=None,
+    #     #     det_outs={1: {"a": 1}},  # to pass lint
+    #     #     score_threshold=0.0,
+    #     #     nms_threshold=0.3,
+    #     #     pre_nms_topk=2000,
+    #     #     nms_topk=200,
+    #     #     det_feat=None,
+    #     #     det_pair_feat=None,
+    #     #     adv_loss=None,
+    #     # )
 
     #     pnp_traj_output = model.loss.perceptual_loss.model.convert_to_pnp_output(
     #         det_output, batched_frames.sweep_end_ns
@@ -1746,4 +1948,4 @@ class VQGAN(nn.Module):
 
 
 def LidarVQGAN(**kwargs):
-    return VQGAN(4096, 1024, **kwargs)
+    return VQGAN(1024, 1024, **kwargs)

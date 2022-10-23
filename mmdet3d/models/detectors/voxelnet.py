@@ -11,9 +11,11 @@ from .. import builder
 from ..builder import DETECTORS
 from .single_stage import SingleStage3DDetector
 from mmdet3d.models.detectors.vqvae import LidarVQGAN
+from mmdet3d.models.detectors.vqvit_cont import LidarVQViT
 
+z_offset = 0.0 # waymo train/val
 # z_offset = 0.4
-z_offset = 1.6
+# z_offset = 1.6
 
 class Voxelizer(torch.nn.Module):
     """Voxelizer for converting Lidar point cloud to image"""
@@ -179,24 +181,31 @@ class VoxelNet(SingleStage3DDetector):
             test_cfg=test_cfg,
             init_cfg=init_cfg,
             pretrained=pretrained)
-        self.voxel_layer = Voxelization(**voxel_layer)
-        self.voxel_encoder = builder.build_voxel_encoder(voxel_encoder)
-        self.middle_encoder = builder.build_middle_encoder(middle_encoder)
-        self.voxelizer = Voxelizer(x_min=voxel_layer['point_cloud_range'][0], y_min=voxel_layer['point_cloud_range'][1], z_min=-2, x_max=voxel_layer['point_cloud_range'][3], y_max=voxel_layer['point_cloud_range'][4], z_max=4, step=0.15625, z_step=0.15)
+        # self.voxel_layer = Voxelization(**voxel_layer)
+        # self.voxel_encoder = builder.build_voxel_encoder(voxel_encoder)
+        # self.middle_encoder = builder.build_middle_encoder(middle_encoder)
+        self.voxelizer = Voxelizer(x_min=voxel_layer['point_cloud_range'][0], y_min=voxel_layer['point_cloud_range'][1], z_min=-2, x_max=voxel_layer['point_cloud_range'][3], y_max=voxel_layer['point_cloud_range'][4], z_max=4, step=voxel_layer['voxel_size'][0], z_step=0.15)
 
-        self.preprocessor = LidarVQGAN()
-        self.preprocessor.load_state_dict(
-            torch.load(
-                "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-24_21-16-06_vqvae_sim512_zh_bottom_box_decoder_frozen/checkpoint/vqvae.pth",
-                # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/ae_baseline.pth",
-                map_location="cpu",
-            ),
-            strict=False,
-        )
-        self.preprocessor.eval()
+        # self.preprocessor = LidarVQGAN()
+        # self.preprocessor = LidarVQViT()
+        # print(
+        #     self.preprocessor.load_state_dict(
+        #         torch.load(
+        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vit_1024_1024_50ep_v6_novq.pth.tar',
+        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_125ep_v6_noploss.pth.tar',
+        #             '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_continuous_1024_1024_170ep.pth.tar',
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_90ep_v6_nodropbeam.pth.tar",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-24_21-16-06_vqvae_sim512_zh_bottom_box_decoder_frozen/checkpoint/vqvae.pth",
+        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/ae_baseline.pth",
+        #             map_location="cpu",
+        #         ), # ['model'],
+        #         strict=False,
+        #     )
+        # )
+        # self.preprocessor.eval()
         # for p in self.preprocessor.parameters():
         #     p.requires_grad = False
-        # self.preprocessor = None
+        self.preprocessor = None
 
     def extract_feat(self, points, img_metas=None):
         """Extract features from points."""
@@ -206,11 +215,16 @@ class VoxelNet(SingleStage3DDetector):
         # voxel_features = self.voxel_encoder(voxels, num_points, coors)
         # batch_size = coors[-1, 0].item() + 1
         # x = self.middle_encoder(voxel_features, coors, batch_size)
+
         x = self.voxelizer([[_] for _ in points])
         if self.preprocessor is not None:
             with torch.no_grad():
-                residual, _ = self.preprocessor.forward(x)
-                x = (x * 20 + residual).sigmoid()
+                pad_x = x.new_zeros((x.shape[0], x.shape[1], 512, 512))
+                pad_x[:, :, :x.shape[2], :x.shape[3]] = x
+                residual, _ = self.preprocessor.forward(pad_x)
+                pad_x = (pad_x * 20 + residual).sigmoid()
+                pad_x[pad_x < 0.3] = 0
+                x = pad_x[:, :, :x.shape[2], :x.shape[3]]
                 # x = (x > 0.5).float().detach()
 
         x = self.backbone(x)

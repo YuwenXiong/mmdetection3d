@@ -7,7 +7,7 @@ point_cloud_range = [0, -40, -2 - 0.4, 80, 40, 4 - 0.4]
 # class_names = ['Car', 'Pedestrian', 'Cyclist']
 class_names = ["Car"]
 dataset_type = "PandasetDataset"
-data_root = "data/pandaset/"
+data_root = "data/pandaset_sim512/"
 input_modality = dict(use_lidar=True, use_camera=False)
 file_client_args = dict(backend="disk")
 # Uncomment the following if use ceph or other file clients.
@@ -24,14 +24,14 @@ file_client_args = dict(backend="disk")
 train_pipeline = [
     dict(type="LoadPointsFromFile", coord_type="LIDAR", load_dim=3, use_dim=3, file_client_args=file_client_args),
     dict(type="LoadAnnotations3D", with_bbox_3d=True, with_label_3d=True),
-    dict(
-        type="ObjectNoise",
-        num_try=100,
-        translation_std=[1.0, 1.0, 0.5],
-        global_rot_range=[0.0, 0.0],
-        rot_range=[-0.78539816, 0.78539816],
-    ),
-    dict(type="RandomFlip3D", flip_ratio_bev_horizontal=0.5),
+    # dict(
+    #     type="ObjectNoise",
+    #     num_try=100,
+    #     translation_std=[1.0, 1.0, 0.5],
+    #     global_rot_range=[0.0, 0.0],
+    #     rot_range=[-0.78539816, 0.78539816],
+    # ),
+    # dict(type="RandomFlip3D", flip_ratio_bev_horizontal=0.5),
     dict(type="GlobalRotScaleTrans", rot_range=[-0.78539816, 0.78539816], scale_ratio_range=[0.95, 1.05]),
     dict(type="PointsRangeFilter", point_cloud_range=point_cloud_range),
     dict(type="ObjectRangeFilter", point_cloud_range=point_cloud_range),
@@ -65,7 +65,7 @@ eval_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=6,
+    samples_per_gpu=4,
     workers_per_gpu=4,
     train=dict(
         type="RepeatDataset",

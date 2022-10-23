@@ -2,14 +2,14 @@
 
 _base_ = [
     "../_base_/models/waabi_two_stage_kitti.py",
-    "../_base_/datasets/kitti-3d-3class.py",
-    # "../_base_/datasets/pandaset-3d-car.py",
+    # "../_base_/datasets/kitti-3d-3class.py",
+    "../_base_/datasets/pandaset-3d-car.py",
     "../_base_/schedules/seg_cosine_50e.py",
     "../_base_/default_runtime.py",
 ]
 
 
-point_cloud_range = [0, -40, -2 - 1.6, 72.5, 40, 4 - 1.6]
+point_cloud_range = [0, -40, -2, 80.0, 40, 4]
 model = dict(
     bbox_head=dict(
         type="Anchor3DHead",
@@ -41,56 +41,54 @@ model = dict(
 )
 
 # dataset settings
-dataset_type = "KittiDataset"
-data_root = "data/kitti/"
 class_names = ["Car"]
+dataset_type = "PandasetDataset"
+data_root = "data/pandaset/"
 db_sampler = dict(
     data_root=data_root,
-    info_path=data_root + "kitti_dbinfos_train.pkl",
+    info_path=data_root + "pandaset_car_bottom_infos_train.pkl",
     rate=1.0,
-    prepare=dict(filter_by_difficulty=[-1], filter_by_min_points=dict(Car=5)),
+    prepare=dict(filter_by_min_points=dict(Car=1)),  # filter_by_difficulty=[-1],
     sample_groups=dict(Car=15),
     classes=class_names,
 )
 
 train_pipeline = [
-    dict(type="LoadPointsFromFile", coord_type="LIDAR", load_dim=4, use_dim=4),
+    dict(type="LoadPointsFromFile", coord_type="LIDAR", load_dim=3, use_dim=3),
     dict(type="LoadAnnotations3D", with_bbox_3d=True, with_label_3d=True),
-    dict(type="ObjectSample", db_sampler=db_sampler, use_ground_plane=True),
+    # dict(type="ObjectSample", db_sampler=db_sampler, use_ground_plane=False),
     # dict(type="RandomFlip3D", flip_ratio_bev_horizontal=0.5),
-    # dict(type="GlobalRotScaleTrans", rot_range=[-0.78539816, 0.78539816], scale_ratio_range=[0.95, 1.05]),
     dict(
         type="GlobalRotScaleTrans",
-        rot_range=[-0.78539816, 0.78539816],
+        rot_range=[-0.3490658504, 0.3490658504],
         scale_ratio_range=[0.9, 1.1],
         translation_std=[2.0, 2.0, 0.5],
     ),
-    dict(type="PointsRangeFilter", point_cloud_range=point_cloud_range),
-    dict(type="ObjectRangeFilter", point_cloud_range=point_cloud_range),
+    dict(type="PointsRangeFilter", point_cloud_range=[0, -40, -2 - 0.4, 80.0, 40, 4 - 0.4]),
+    dict(type="ObjectRangeFilter", point_cloud_range=[0, -40, -2 - 0.4, 80.0, 40, 4 - 0.4]),
     dict(type="PointShuffle"),
     dict(type="DefaultFormatBundle3D", class_names=class_names),
     dict(type="Collect3D", keys=["points", "gt_bboxes_3d", "gt_labels_3d"]),
 ]
 test_pipeline = [
-    dict(type="LoadPointsFromFile", coord_type="LIDAR", load_dim=4, use_dim=3),
+    dict(type="LoadPointsFromFile", coord_type="LIDAR", load_dim=3, use_dim=3),
     dict(
         type="MultiScaleFlipAug3D",
         img_scale=(1333, 800),
         pts_scale_ratio=1,
         flip=False,
         transforms=[
-            dict(type="GlobalRotScaleTrans", rot_range=[0, 0], scale_ratio_range=[1.0, 1.0], translation_std=[0, 0, 0]),
+            dict(type="GlobalRotScaleTrans", rot_range=[0, 0], scale_ratio_range=[1.0, 1.0]),
             dict(type="RandomFlip3D"),
-            dict(type="PointsRangeFilter", point_cloud_range=point_cloud_range),
+            dict(type="PointsRangeFilter", point_cloud_range=[0, -40, -2 - 0.4, 80.0, 40, 4 - 0.4]),
             dict(type="DefaultFormatBundle3D", class_names=class_names, with_label=False),
             dict(type="Collect3D", keys=["points"]),
         ],
     ),
 ]
 
-optimizer = dict(type="AdamW", lr=0.001, weight_decay=1e-4)
-lr_config = dict(policy='CosineAnnealing', warmup=None, min_lr=1e-8)
-runner = dict(type="EpochBasedRunner", max_epochs=80)
+optimizer = dict(type="AdamW", lr=0.0001, weight_decay=1e-4)
+runner = dict(type="EpochBasedRunner", max_epochs=400)
 
 data = dict(
     train=dict(type="RepeatDataset", times=2, dataset=dict(pipeline=train_pipeline, classes=class_names)),
@@ -98,6 +96,14 @@ data = dict(
     test=dict(pipeline=test_pipeline, classes=class_names),
 )
 
-find_unused_parameters = True
+runner = dict(max_epochs=40)
 
-work_dir = "work_dirs/waabi_two_stage_kitti-3d-car-run4"
+# Use evaluation interval=2 reduce the number of evaluation timese
+evaluation = dict(interval=1)
+checkpoint_config = dict(interval=1)
+
+work_dir = "work_dirs/waabi_two_stage_pandaset-3d-car-run5_data_fix"
+
+# work_dir = "work_dirs/pandaset_overfit"
+
+find_unused_parameters = True

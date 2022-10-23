@@ -1,4 +1,5 @@
-voxel_size = [0.15625, 0.15625, 4]
+voxel_size = [0.15625, 0.15625, 6]
+# voxel_size = [0.3, 0.3, 6]
 
 model = dict(
     type="WaabiTwoStageDetector",

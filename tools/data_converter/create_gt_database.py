@@ -169,7 +169,30 @@ def create_groundtruth_database(dataset_class_name,
                     with_label_3d=True,
                     file_client_args=file_client_args)
             ])
-
+    if dataset_class_name == 'PandasetDataset':
+        file_client_args = dict(backend='disk')
+        dataset_cfg.update(
+            test_mode=False,
+            # split='training',
+            modality=dict(
+                use_lidar=True,
+                use_depth=False,
+                use_lidar_intensity=True,
+                use_camera=with_mask,
+            ),
+            pipeline=[
+                dict(
+                    type='LoadPointsFromFile',
+                    coord_type='LIDAR',
+                    load_dim=3,
+                    use_dim=3,
+                    file_client_args=file_client_args),
+                dict(
+                    type='LoadAnnotations3D',
+                    with_bbox_3d=True,
+                    with_label_3d=True,
+                    file_client_args=file_client_args)
+            ])
     elif dataset_class_name == 'NuScenesDataset':
         dataset_cfg.update(
             use_valid_flag=True,
@@ -239,7 +262,7 @@ def create_groundtruth_database(dataset_class_name,
         dataset.pre_pipeline(input_dict)
         example = dataset.pipeline(input_dict)
         annos = example['ann_info']
-        image_idx = example['sample_idx']
+        # image_idx = example['sample_idx']
         points = example['points'].tensor.numpy()
         gt_boxes_3d = annos['gt_bboxes_3d'].tensor.numpy()
         names = annos['gt_names']
@@ -404,7 +427,7 @@ class GTDatabaseCreater:
         single_db_infos = dict()
         example = self.pipeline(input_dict)
         annos = example['ann_info']
-        image_idx = example['sample_idx']
+        # image_idx = example['sample_idx']
         points = example['points'].tensor.numpy()
         gt_boxes_3d = annos['gt_bboxes_3d'].tensor.numpy()
         names = annos['gt_names']

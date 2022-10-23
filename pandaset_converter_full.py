@@ -15,6 +15,7 @@ import pickle
 from pytorch3d import transforms
 from pytorch3d.transforms.transform3d import Transform3d
 import torch
+from tools.data_converter.create_gt_database import GTDatabaseCreater, create_groundtruth_database
 
 pandaset_categories = ["Car", "Pedestrian", "Cyclist"]
 
@@ -128,6 +129,15 @@ def create_pandaset_infos(root_path, out_path, info_prefix, split_version="0.1",
     #                             '{}_infos_val_overfit.pkl'.format(info_prefix))
     mmcv.dump(data, info_val_path)
 
+    # create_groundtruth_database(
+    #     'PandasetDataset',
+    #     root_path,
+    #     info_prefix,
+    #     f'{out_path}/{info_prefix}_infos_train.pkl',
+    #     relative_path=False,
+    #     mask_anno_path='instances_train.json',
+    #     with_mask=False)
+
 
 def _get_can_bus_info(nusc, nusc_can_bus, sample):
     scene_name = nusc.get("scene", sample["scene_token"])["name"]
@@ -166,22 +176,25 @@ def _fill_trainval_infos(scenes, max_sweeps=10):
     for scene in mmcv.track_iter_progress(scenes):
         # scene.load_()
         scene.lidar._load_poses()
-        scene.load_timestamps()
+        # scene.load_timestamps()
         # scene.load_lidar()
         data_dir = scene._directory
         seq_id = os.path.basename(data_dir)
         # for sample in mmcv.track_iter_progress(nusc.sample):
 
-        for frame_idx in range(len(scene.timestamps.data)):
+        for frame_idx in range(1, len(scene.lidar.poses)):
             info = {
                 "sequence": seq_id,
                 "frame_idx": frame_idx,
-                "lidar_path": os.path.join(data_dir, "lidar", ("{:02d}.pkl".format(frame_idx))),
+                # "lidar_path": os.path.join(data_dir, "lidar", ("{:02d}.pkl".format(frame_i
+                # dx))),
+                "lidar_path": os.path.join(data_dir, "lidar", ("{:03d}.npy".format(frame_idx))),
                 "cuboids_path": os.path.join(data_dir, "annotations", "cuboids", ("{:02d}.pkl".format(frame_idx))),
+                # "cuboids_path": os.path.join(data_dir, "annotations", "cuboids", ("{:03d}.npy".format(frame_idx))),
                 # 'semseg_path': os.path.join(data_dir, 'annotations', 'semseg', ("{:02d}.pkl.gz".format(frame_idx))),
                 # 'classes_path': os.path.join(data_dir, 'annotations', 'semseg', "classes.json"),
                 # "cams": dict(),
-                "timestamp": scene.timestamps.data[frame_idx],
+                # "timestamp": scene.timestamps.data[frame_idx],
             }
 
             # camera_types = [
@@ -230,7 +243,17 @@ def _fill_trainval_infos(scenes, max_sweeps=10):
             # obtain annotation
             cuboids_path = info["cuboids_path"]
             annotations = pickle.load(open(cuboids_path, "rb"))
+            try:
+                annotations2 = np.load(
+                    os.path.join(data_dir, "annotations", "cuboids", ("{:03d}.npy".format(frame_idx))), allow_pickle=True
+                ).item()
+            except:
+                print(cuboids_path)
             # annotations = scene.cuboids.data
+
+            annotations = {k: v for k, v in annotations.items() if k in annotations2}
+            for k in annotations.keys():
+                annotations[k]['num_pts'] = annotations2[k][0]['num_pts']
 
             locs = np.array(
                 [label["position"] for _, label in annotations.items() if label["cuboids_sensor_id"] != 1]
@@ -279,7 +302,11 @@ def _fill_trainval_infos(scenes, max_sweeps=10):
             names = np.array(names)
             masks = np.array(masks)
 
-            locs = locs[masks]
+            try:
+                locs = locs[masks]
+            except:
+                import ipdb; ipdb.set_trace()
+
             locs_ego = locs_ego[masks]
             dims = dims[masks]
             names = names[masks]
@@ -295,7 +322,13 @@ def _fill_trainval_infos(scenes, max_sweeps=10):
             #### switch to FLU
             gt_boxes = np.concatenate(
                 # [locs_ego[:, [1]], -locs_ego[:, [0]], locs_ego[:, [2]], dims[:, [1, 0, 2]], ego_yaws], axis=1
-                [locs_ego[:, [1]], -locs_ego[:, [0]], locs_ego[:, [2]] - dims[:, [2]] / 2, dims[:, [1, 0, 2]], ego_yaws],
+                [
+                    locs_ego[:, [1]],
+                    -locs_ego[:, [0]],
+                    locs_ego[:, [2]] - dims[:, [2]] / 2,
+                    dims[:, [1, 0, 2]],
+                    ego_yaws,
+                ],
                 axis=1,
             )
             # gt_boxes = np.concatenate([locs, dims[:, [1, 0, 2]], -yaws + np.pi / 2], axis=1)
@@ -319,10 +352,11 @@ def _fill_trainval_infos(scenes, max_sweeps=10):
 if __name__ == "__main__":
     # create_pandaset_infos("/mnt/data/pandaset_pnp_npt_cam", "/mnt/data/pandaset_pnp_npt_cam", "pandaset")
     create_pandaset_infos(
-        "/mnt/remote/shared_data/datasets/pandaset_pnp_npt_64only",
-        "/mnt/remote/shared_data/datasets/pandaset_pnp_npt_64only",
+        "./data/pandaset_sim512",
+        "./data/pandaset_sim512",
         "pandaset_car_bottom",
         "0.1",
     )
+
     # create_pandaset_infos("/mnt/data/pandaset_pnp_npt_cam", "/mnt/data/pandaset_pnp_npt_cam", "pandaset", "pnp_sim_0.1")
     # create_pandaset_infos("/mnt/data/pandaset_pnp_npt_cam", "/mnt/data/pandaset_pnp_npt_cam", "pandaset", "overfit")
