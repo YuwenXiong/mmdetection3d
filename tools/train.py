@@ -128,7 +128,9 @@ def main():
         torch.backends.cudnn.benchmark = True
 
     # work_dir is determined in this priority: CLI > segment in file > filename
-    if args.work_dir is not None:
+    if 'WAABI_OUTPUT_DIR_ENV' in os.environ:
+        cfg.work_dir = os.environ['WAABI_OUTPUT_DIR_ENV']
+    elif args.work_dir is not None:
         # update configs according to CLI args if args.work_dir is not None
         cfg.work_dir = args.work_dir
     elif cfg.get('work_dir', None) is None:
