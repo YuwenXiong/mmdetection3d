@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+source /root/.bashrc 
+
 cd $(dirname $0)/..
 
 git pull
