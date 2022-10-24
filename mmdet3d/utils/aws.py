@@ -95,6 +95,8 @@ def sync_local_folder_to_s3() -> bool:
     if WAABI_OUTPUT_DIR_ENV not in os.environ:
         return False
 
+    print(os.environ[WAABI_OUTPUT_DIR_ENV], os.environ[WAABI_S3_JOB_FOLDER_ENV])
+
     if not os.path.exists(os.environ[WAABI_OUTPUT_DIR_ENV]):
         os.makedirs(os.environ[WAABI_OUTPUT_DIR_ENV])
 
