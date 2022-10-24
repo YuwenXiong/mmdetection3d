@@ -1,6 +1,8 @@
 #!/bin/bash -i
 
 source /root/.bashrc
+export CPATH=/root/miniconda3/include:$CPATH
+conda init
 
 cd $(dirname $0)/..
 
