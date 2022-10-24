@@ -1,4 +1,4 @@
-#!/usr/bin/env bash -i
+#!/bin/bash -i
 
 source /root/.bashrc
 
