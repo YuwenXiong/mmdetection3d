@@ -37,5 +37,8 @@ model = dict(
         debug=False,
     ),
 )
-runner = dict(type="EpochBasedRunner", max_epochs=30)
+runner = dict(type="EpochBasedRunner", max_epochs=24)
 optimizer = dict(type="AdamW", lr=0.001 / 4, weight_decay=0.01)
+
+# work_dir = "work_dirs/test"
+mp_start_method = 'forkserver'

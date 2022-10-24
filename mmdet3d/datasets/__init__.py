@@ -29,6 +29,7 @@ from .semantickitti_dataset import SemanticKITTIDataset
 from .sunrgbd_dataset import SUNRGBDDataset
 from .utils import get_loading_pipeline
 from .waymo_dataset import WaymoDataset
+from .fileclient import S3Backend
 
 __all__ = [
     'KittiDataset', 'KittiMonoDataset', 'build_dataloader', 'DATASETS',
@@ -44,5 +45,5 @@ __all__ = [
     'VoxelBasedPointSampler', 'get_loading_pipeline', 'RandomDropPointsColor',
     'RandomJitterPoints', 'ObjectNameFilter', 'AffineResize',
     'RandomShiftScale', 'LoadPointsFromDict', 'PIPELINES',
-    'RangeLimitedRandomCrop', 'RandomRotate', 'MultiViewWrapper', 'PandasetDataset'
+    'RangeLimitedRandomCrop', 'RandomRotate', 'MultiViewWrapper', 'PandasetDataset', 'S3Backend'
 ]

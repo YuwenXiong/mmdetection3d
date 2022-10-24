@@ -2,10 +2,10 @@
 # D5 in the config name means the whole dataset is divided into 5 folds
 # We only use one fold for efficient experiments
 dataset_type = 'WaymoDataset'
-# data_root = 's3://waabi-live-training-datasets/non_commercial_use_only/waymo_kitti_format/'
-data_root = '/mnt/data/waymo_dataset/kitti_format/'
-file_client_args = dict(backend='disk')
-# file_client_args = dict(prefix='s3')
+data_root = 's3://waabi-live-training-datasets/non_commercial_use_only/waymo_kitti_format/'
+# data_root = '/mnt/data/waymo_dataset/kitti_format/'
+# file_client_args = dict(backend='disk')
+file_client_args = dict(prefix='awss3', base_uri=data_root)
 # Uncomment the following if use ceph or other file clients.
 # See https://mmcv.readthedocs.io/en/latest/api.html#mmcv.fileio.FileClient
 # for more details.
@@ -27,7 +27,8 @@ db_sampler = dict(
         coord_type='LIDAR',
         load_dim=6,
         use_dim=[0, 1, 2],
-        file_client_args=file_client_args))
+        file_client_args=file_client_args),
+    file_client_args=file_client_args)
 
 train_pipeline = [
     dict(
@@ -104,6 +105,7 @@ eval_pipeline = [
 data = dict(
     samples_per_gpu=2,
     workers_per_gpu=4,
+    persistent_workers=True,
     train=dict(
         type='RepeatDataset',
         times=2,
@@ -120,7 +122,8 @@ data = dict(
             # and box_type_3d='Depth' in sunrgbd and scannet dataset.
             box_type_3d='LiDAR',
             # load one frame every five frames
-            load_interval=5)),
+            load_interval=5,
+            file_client_args=file_client_args)),
     val=dict(
         type=dataset_type,
         data_root=data_root,
@@ -130,7 +133,8 @@ data = dict(
         modality=input_modality,
         classes=class_names,
         test_mode=True,
-        box_type_3d='LiDAR', load_interval=5),
+        box_type_3d='LiDAR', load_interval=5,
+        file_client_args=file_client_args),
     test=dict(
         type=dataset_type,
         data_root=data_root,
@@ -140,6 +144,7 @@ data = dict(
         modality=input_modality,
         classes=class_names,
         test_mode=True,
-        box_type_3d='LiDAR', load_interval=5))
+        box_type_3d='LiDAR', load_interval=5,
+        file_client_args=file_client_args))
 
-evaluation = dict(interval=2, pipeline=eval_pipeline)
+evaluation = dict(interval=24, pipeline=eval_pipeline)
