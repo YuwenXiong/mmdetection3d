@@ -7,6 +7,7 @@ import botocore
 import torch.distributed as dist
 import logging
 from urllib.parse import parse_qs, urlparse
+from mmcv.runner.dist_utils import master_only
 
 WAABI_OUTPUT_DIR_ENV = "WAABI_OUTPUT_DIR"
 WAABI_S3_JOB_FOLDER_ENV = "WAABI_S3_JOB_FOLDER"
@@ -78,16 +79,17 @@ class SyncAWSHook(Hook):
         print("invoke syncaws hook")
 
     def before_run(self, runner):
-        print('before run, sync aws')
+        print("before run, sync aws")
         if "WORLD_SIZE" in os.environ and dist.get_rank() == 0:
             sync_local_folder_to_s3()
 
     def after_epoch(self, runner):
-        print('after epoch, sync aws', )
+        print("after epoch, sync aws")
         if "WORLD_SIZE" in os.environ and dist.get_rank() == 0:
             sync_local_folder_to_s3()
 
 
+@master_only
 def sync_local_folder_to_s3() -> bool:
     """Sync local folder to S3 based on env variables"""
     if WAABI_OUTPUT_DIR_ENV not in os.environ:
