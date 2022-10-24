@@ -19,7 +19,8 @@ from mmdet3d.core.post_processing import nms_bev
 from mmcv.ops.box_iou_rotated import box_iou_rotated
 from scipy.optimize import linear_sum_assignment
 
-z_offset = 1.6
+z_offset = 0.0
+# z_offset = 1.6
 # z_offset = 0.4
 
 
@@ -867,7 +868,8 @@ class WaabiTwoStageDetector(Base3DDetector):
         # self.bev_range = (self.voxel_cfg.x_min, self.voxel_cfg.x_max, self.voxel_cfg.y_min, self.voxel_cfg.y_max)
         # [0, -39.68, -3, 69.12, 39.68, 1]
         # self.bev_range = [0, 69.12, -39.68, 39.68]
-        self.bev_range = [0, 80, -40, 40]
+        # self.bev_range = [0, 80, -40, 40]
+        self.bev_range = [-74.24, 74.24, -74.24, 74.24]
         self.roi_size = 3
         self.dist_th = 20.0  # distance threshold used in spatial attention
         weights = dict(cls=1.0, iou=2.0, track=1.0, heading=1.0)  # weights of multi-task loss
@@ -882,7 +884,7 @@ class WaabiTwoStageDetector(Base3DDetector):
         self.max_det = 100
 
         self.voxelizer = Voxelizer(
-            self.bev_range[0], self.bev_range[1], self.bev_range[2], self.bev_range[3], 0.15625, -2, 4, 0.15
+            self.bev_range[0], self.bev_range[1], self.bev_range[2], self.bev_range[3], 0.32, -2, 4, 0.15
         )
         # self.voxelizer = Voxelizer(
         #     self.bev_range[0], self.bev_range[1], self.bev_range[2], self.bev_range[3], 0.3, -2, 4, 0.3
