@@ -80,13 +80,11 @@ class SyncAWSHook(Hook):
 
     def before_run(self, runner):
         print("before run, sync aws")
-        if "WORLD_SIZE" in os.environ and dist.get_rank() == 0:
-            sync_local_folder_to_s3()
+        sync_local_folder_to_s3()
 
     def after_epoch(self, runner):
         print("after epoch, sync aws")
-        if "WORLD_SIZE" in os.environ and dist.get_rank() == 0:
-            sync_local_folder_to_s3()
+        sync_local_folder_to_s3()
 
 
 @master_only

@@ -23,7 +23,10 @@ import tempfile
 
 import s3fs
 from io import BytesIO
-
+from s3fs import S3FileSystem
+import boto3
+from pathlib import Path
+from pyarrow.fs import FileSystem
 
 
 class RelativeFileSystemProtocol(str, Enum):
@@ -361,6 +364,20 @@ class RelativeFileSystem(fsspec.AbstractFileSystem):
         return self.base_fs.object_version_info(self._base_path + remove_leading_slash(relative_path))
 
 
+def s3_reader(s3, bucket, key):
+    response = s3.get_object(Bucket=bucket, Key=key)
+    buf = bytearray(response["ContentLength"])
+    view = memoryview(buf)
+    pos = 0
+    while True:
+        chunk = response["Body"].read(67108864)
+        if len(chunk) == 0:
+            break
+        view[pos : pos + len(chunk)] = chunk
+        pos += len(chunk)
+    return view
+
+
 @mmcv.FileClient.register_backend("awss3", prefixes="awss3")
 class S3Backend(BaseStorageBackend):
     """Petrel storage backend (for internal use).
@@ -388,6 +405,10 @@ class S3Backend(BaseStorageBackend):
     def __init__(self, base_uri):
         self._client = RelativeFileSystem.from_base_uri(base_uri)
         self.base_uri_len = len(base_uri)
+        fs, basepath = FileSystem.from_uri(base_uri)
+        self.basepath = Path(basepath)
+        self.bucket = str(self.basepath.parents[1])
+        self.bucket_len = len(f"s3://{self.bucket}/")
 
     def get(self, filepath: Union[str, Path], mode="rb") -> memoryview:
         """Read data from a given ``filepath`` with 'rb' mode.
@@ -400,12 +421,19 @@ class S3Backend(BaseStorageBackend):
                 copying. The memoryview object can be converted to bytes by
                 ``value_buf.tobytes()``.
         """
-        if filepath.startswith(self._client.base_uri):
-            filepath = filepath[self.base_uri_len :]
+        # if filepath.startswith(self._client.base_uri):
+        #     filepath = filepath[self.base_uri_len :]
 
-        value = self._client.open(filepath, mode)
-        # return BytesIO(value.read())
-        value_buf = memoryview(value.read())
+        # s3 = S3FileSystem()
+        # with s3.open(filepath, mode) as f:
+        # # value = self._client.open(filepath, mode)
+        # # return BytesIO(value.read())
+        #     value_buf = memoryview(f.read())
+
+        # print(self.bucket, filepath[self.bucket_len:])
+        s3_client = boto3.client("s3")
+
+        value_buf = s3_reader(s3_client, self.bucket, filepath[self.bucket_len :])
 
         return value_buf
 
@@ -547,10 +575,10 @@ class S3Backend(BaseStorageBackend):
         Yields:
             Iterable[str]: Only yield one temporary path.
         """
-        if filepath.startswith(self._client.base_uri):
-            filepath = filepath[self.base_uri_len :]
+        # if filepath.startswith(self._client.base_uri):
+        #     filepath = filepath[self.base_uri_len :]
 
-        assert self._client.isfile(filepath)
+        assert self._client.isfile(filepath[self.base_uri_len :])
         try:
             f = tempfile.NamedTemporaryFile(delete=False)
             f.write(self.get(filepath))
