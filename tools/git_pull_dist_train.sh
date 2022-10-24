@@ -2,6 +2,7 @@
 
 source /root/.bashrc
 export CPATH=/root/miniconda3/include:$CPATH
+export CUDA_PATH=/root/miniconda3/include:$CUDA_PATH
 conda init
 
 cd $(dirname $0)/..
