@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-source /root/.bashrc 
+source /root/.bashrc
 
 cd $(dirname $0)/..
 
@@ -14,7 +14,7 @@ PORT=${PORT:-29500}
 MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 
 PYTHONPATH="$(dirname $0)/..":$PYTHONPATH \
-python -m torch.distributed.launch \
+/root/miniconda3/bin/python -m torch.distributed.launch \
     --nnodes=$NNODES \
     --node_rank=$NODE_RANK \
     --master_addr=$MASTER_ADDR \
