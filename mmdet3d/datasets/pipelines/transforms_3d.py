@@ -993,7 +993,7 @@ class ObjectNameFilter(object):
 
     def __init__(self, classes):
         self.classes = classes
-        self.labels = list(range(len(self.classes)))
+        self.labels = [-1] + list(range(len(self.classes)))
 
     def __call__(self, input_dict):
         """Call function to filter objects by their names.

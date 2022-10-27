@@ -5,7 +5,7 @@ from mmdet.models import TwoStageDetector
 
 from mmdet3d.core.bbox.transforms import bbox3d2result
 from mmdet3d.models.detectors.vqvae import LidarVQGAN, VectorQuantizer
-from mmdet3d.models.detectors.vqvit_cont import LidarVQViT
+from mmdet3d.models.detectors.vqvit import LidarVQViT
 from ..builder import DETECTORS, build_backbone, build_head, build_neck
 from .base import Base3DDetector
 from mmcv.ops.roi_align_rotated import RoIAlignRotated
@@ -19,8 +19,8 @@ from mmdet3d.core.post_processing import nms_bev
 from mmcv.ops.box_iou_rotated import box_iou_rotated
 from scipy.optimize import linear_sum_assignment
 
-z_offset = 0.0
-# z_offset = 1.6
+# z_offset = 0.0
+z_offset = 1.6
 # z_offset = 0.4
 
 
@@ -327,7 +327,7 @@ class DetectionLoss(nn.Module):
             cos_cost = F.smooth_l1_loss(theta.cos(), gt_theta.cos(), reduction="none")
             angle_cost = sin_cost + cos_cost
 
-            cost += self.weights["iou"] * (iou_cost + 1.0 * box_cost + angle_cost)
+            cost += self.weights["iou"] * (iou_cost + 0.1 * box_cost + angle_cost)
 
             idcs_a, idcs_b = linear_sum_assignment(cost.cpu())
             pos_idcs.append(torch.as_tensor(idcs_a, device=gt["bboxes"][0].device, dtype=torch.int64))
@@ -420,7 +420,7 @@ class DetectionLoss(nn.Module):
         cos_loss = F.smooth_l1_loss(theta.cos(), gt_theta.cos(), reduction="sum")
         angle_loss = (sin_loss + cos_loss) / num_bboxes
         # return 0.1 * box_loss + iou_loss + angle_loss
-        return 1.0 * box_loss, iou_loss, angle_loss
+        return 0.1 * box_loss, iou_loss, angle_loss
 
     def track_loss(self, out, gt, pos_idcs, gt_idcs, num_bboxes):
         batch_size = len(pos_idcs)
@@ -868,8 +868,8 @@ class WaabiTwoStageDetector(Base3DDetector):
         # self.bev_range = (self.voxel_cfg.x_min, self.voxel_cfg.x_max, self.voxel_cfg.y_min, self.voxel_cfg.y_max)
         # [0, -39.68, -3, 69.12, 39.68, 1]
         # self.bev_range = [0, 69.12, -39.68, 39.68]
-        # self.bev_range = [0, 80, -40, 40]
-        self.bev_range = [-74.24, 74.24, -74.24, 74.24]
+        self.bev_range = [0, 80, -40, 40]
+        # self.bev_range = [-74.24, 74.24, -74.24, 74.24]
         self.roi_size = 3
         self.dist_th = 20.0  # distance threshold used in spatial attention
         weights = dict(cls=1.0, iou=2.0, track=1.0, heading=1.0)  # weights of multi-task loss
@@ -880,11 +880,19 @@ class WaabiTwoStageDetector(Base3DDetector):
         n = 128  # feature dimension
 
         # Post-processing hyperparameters
-        self.conf_thresh = 0.1
+        self.conf_thresh = 0.05
         self.max_det = 100
 
         self.voxelizer = Voxelizer(
-            self.bev_range[0], self.bev_range[1], self.bev_range[2], self.bev_range[3], 0.32, -2, 4, 0.15
+            # self.bev_range[0], self.bev_range[1], self.bev_range[2], self.bev_range[3], 0.32, -2, 4, 0.15
+            self.bev_range[0],
+            self.bev_range[1],
+            self.bev_range[2],
+            self.bev_range[3],
+            0.15625,
+            -2,
+            4,
+            0.15,
         )
         # self.voxelizer = Voxelizer(
         #     self.bev_range[0], self.bev_range[1], self.bev_range[2], self.bev_range[3], 0.3, -2, 4, 0.3
@@ -941,29 +949,9 @@ class WaabiTwoStageDetector(Base3DDetector):
         # print(
         #     self.preprocessor.load_state_dict(
         #         torch.load(
-        #             '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vit_1024_1024_50ep_v6_novq.pth.tar',
-        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_continuous_1024_1024_170ep.pth.tar',
-        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_125ep_v6_noploss.pth.tar',
-        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_continuous_1024_1024_130ep.pth.tar',
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_90ep_v6_nodropbeam.pth.tar",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_v5data/checkpoint/model_00140e.pth.tar",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_residual_1024_512_20ep.pth.tar",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_sparse_1024_512_140ep.pth.tar",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_2048_512_80ep.pth.tar",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_80ep.pth.tar",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvit_2048code_sparse_to_dense_ploss_00100e.pth.tar",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvit_2048code_sparse_to_dense_ploss_00070e.pth.tar",
-        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-10-01_19-30-39_new_arch2_1024code_decoder_frozen/checkpoint/model_00080e.pth.tar',
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvit_1024code_sparse_00120e.pth.tar",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvit_2048code_sparse_to_dense_00150e.pth.tar",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvit_1024code_nonoccluded_00180e.pth.tar",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-30_03-36-08_vqvae_sim512_zh_bottom_box_new_arch_nowd_1024code_decoder_frozen/checkpoint/vqvae_ep60.pth",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-24_21-16-06_vqvae_sim512_zh_bottom_box_decoder_frozen/checkpoint/vqvae.pth",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-21_03-41-58_vqvae_decoder_frozen/checkpoint/vqvae.pth",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/vqvae.pth",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/ae_baseline.pth",
+        #             '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-23_20-47-24_8x_pandaset_front/checkpoint/model_00140e.pth.tar',
         #             map_location="cpu",
-        #         ),  # ["model"],
+        #         )["model"],
         #         strict=False,
         #     )
         # )
@@ -1131,11 +1119,13 @@ class WaabiTwoStageDetector(Base3DDetector):
             residual, _ = self.preprocessor.forward(bev)
             # bev = gumbel_sigmoid(bev * 200 + residual, hard=True)
             bev = (bev * 200 + residual).sigmoid()
-            # bev[bev < 0.3] = 0
+            bev[bev < 0.1] = 0
+            # bev[bev > 0.9] = 1
             # bev = (gumbel_sigmoid(residual, hard=True)).float()
             # bev = (residual.sigmoid()).float()
             # import ipdb; ipdb.set_trace()
         feat = self.backbone(bev)
+        # import ipdb; ipdb.set_trace()
         fm = feat[0]
         # q_fm, _, _ = self.quantizer(self.pre_quant(fm))
         q_fm = fm
@@ -1217,9 +1207,7 @@ class WaabiTwoStageDetector(Base3DDetector):
 
             bbox_list.append((bboxes, scores, labels))
 
-        # import ipdb
-
-        # ipdb.set_trace()
+        # import ipdb; ipdb.set_trace()
 
         bbox_results = [bbox3d2result(bboxes, scores, labels) for bboxes, scores, labels in bbox_list]
         return bbox_results

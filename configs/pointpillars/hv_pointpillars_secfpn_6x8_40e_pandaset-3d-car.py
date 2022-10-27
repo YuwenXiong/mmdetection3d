@@ -9,6 +9,7 @@ _base_ = [
 # point_cloud_range = [0, -39.68, -2, 79.36, 39.68, 4]
 point_cloud_range = [0, -40, -2, 80.0, 40.0, 4]
 data_root = "data/pandaset_sim512/"
+# data_root = "data/pandaset/"
 class_names = ["Car"]
 file_client_args = dict(backend="disk")
 model = dict(
@@ -35,7 +36,7 @@ model = dict(
             pos_iou_thr=0.6,
             neg_iou_thr=0.3,
             min_pos_iou=0.3,
-            ignore_iof_thr=-1,
+            ignore_iof_thr=0.5,
         ),
         allowed_border=0,
         pos_weight=-1,
@@ -113,5 +114,5 @@ checkpoint_config = dict(interval=2)
 
 
 find_unused_parameters = True
-work_dir = "work_dirs/hv_pointpillars_secfpn_6x8_80e_pandaset-3d-car-binarynewvoxel_height_fix_kitti_anchor_sim512_data_fix2"
+work_dir = "work_dirs/hv_pointpillars_secfpn_6x8_80e_pandaset-3d-car-binarynewvoxel_height_fix_kitti_anchor_sim512_data_fix4"
 cudnn_benchmark = True

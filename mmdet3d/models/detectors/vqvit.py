@@ -1011,7 +1011,8 @@ class VQViT(nn.Module):
         # self.norm = norm_layer(embed_dim * 2)
         # self.pre_quant = nn.Linear(embed_dim * 2, codebook_dim)
         self.norm = nn.Sequential(norm_layer(embed_dim * 2), nn.GELU())
-        self.pre_quant = nn.Sequential(nn.Linear(embed_dim * 2, codebook_dim), norm_layer(codebook_dim))
+        # self.pre_quant = nn.Sequential(nn.Linear(embed_dim * 2, codebook_dim), norm_layer(codebook_dim))
+        self.pre_quant = nn.Linear(embed_dim * 2, codebook_dim)
         self.quantize_t = VectorQuantizer(
             n_embed, codebook_dim, beta=0.25, remap=remap, sane_index_shape=sane_index_shape, legacy=False
         )

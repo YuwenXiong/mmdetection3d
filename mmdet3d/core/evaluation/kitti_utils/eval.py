@@ -511,7 +511,7 @@ def eval_class(gt_annos,
                     tp, fp, fn, similarity, thresholds = rets
                     thresholdss += thresholds.tolist()
                 thresholdss = np.array(thresholdss)
-                thresholds = get_thresholds(thresholdss, total_num_valid_gt)
+                thresholds = get_thresholds(thresholdss, total_num_valid_gt, N_SAMPLE_PTS)
                 thresholds = np.array(thresholds)
                 pr = np.zeros([len(thresholds), 4])
                 idx = 0

@@ -11,10 +11,10 @@ from .. import builder
 from ..builder import DETECTORS
 from .single_stage import SingleStage3DDetector
 from mmdet3d.models.detectors.vqvae import LidarVQGAN
-from mmdet3d.models.detectors.vqvit_cont import LidarVQViT
+from mmdet3d.models.detectors.vqvit import LidarVQViT
 
-z_offset = 0.0 # waymo train/val
-# z_offset = 0.4
+# z_offset = 0.0 # waymo train/val
+z_offset = 0.4
 # z_offset = 1.6
 
 class Voxelizer(torch.nn.Module):
@@ -186,19 +186,14 @@ class VoxelNet(SingleStage3DDetector):
         # self.middle_encoder = builder.build_middle_encoder(middle_encoder)
         self.voxelizer = Voxelizer(x_min=voxel_layer['point_cloud_range'][0], y_min=voxel_layer['point_cloud_range'][1], z_min=-2, x_max=voxel_layer['point_cloud_range'][3], y_max=voxel_layer['point_cloud_range'][4], z_max=4, step=voxel_layer['voxel_size'][0], z_step=0.15)
 
-        # self.preprocessor = LidarVQGAN()
+        # # self.preprocessor = LidarVQGAN()
         # self.preprocessor = LidarVQViT()
         # print(
         #     self.preprocessor.load_state_dict(
         #         torch.load(
-        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vit_1024_1024_50ep_v6_novq.pth.tar',
-        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_125ep_v6_noploss.pth.tar',
-        #             '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_continuous_1024_1024_170ep.pth.tar',
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_1024_1024_90ep_v6_nodropbeam.pth.tar",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/det_front_2022-09-24_21-16-06_vqvae_sim512_zh_bottom_box_decoder_frozen/checkpoint/vqvae.pth",
-        #             # "/mnt/remote/shared_data/users/yuwen/arch_baselines_aug/ae_baseline.pth",
+        #             '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-23_20-47-24_8x_pandaset_front/checkpoint/model_00140e.pth.tar',
         #             map_location="cpu",
-        #         ), # ['model'],
+        #         )["model"],
         #         strict=False,
         #     )
         # )
@@ -223,7 +218,7 @@ class VoxelNet(SingleStage3DDetector):
                 pad_x[:, :, :x.shape[2], :x.shape[3]] = x
                 residual, _ = self.preprocessor.forward(pad_x)
                 pad_x = (pad_x * 20 + residual).sigmoid()
-                pad_x[pad_x < 0.3] = 0
+                pad_x[pad_x < 0.1] = 0
                 x = pad_x[:, :, :x.shape[2], :x.shape[3]]
                 # x = (x > 0.5).float().detach()
 
@@ -276,6 +271,12 @@ class VoxelNet(SingleStage3DDetector):
         outs = self.bbox_head(x)
         for box in gt_bboxes_3d:
             box.tensor[:, 2] += z_offset
+
+        gt_bboxes_ignore = []
+        for i in range(len(gt_bboxes_3d)):
+            gt_bboxes_ignore.append(gt_bboxes_3d[i][gt_labels_3d[i] == -1].tensor)
+            gt_bboxes_3d[i] = gt_bboxes_3d[i][gt_labels_3d[i] != -1]
+            gt_labels_3d[i] = gt_labels_3d[i][gt_labels_3d[i] != -1]
         loss_inputs = outs + (gt_bboxes_3d, gt_labels_3d, img_metas)
         losses = self.bbox_head.loss(
             *loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore)

@@ -270,6 +270,8 @@ class AnchorTrainMixin(object):
         if len(gt_bboxes) > 0:
             if not isinstance(gt_bboxes, torch.Tensor):
                 gt_bboxes = gt_bboxes.tensor.to(anchors.device)
+            if gt_bboxes_ignore is not None:
+                gt_bboxes_ignore = gt_bboxes_ignore.to(anchors.device)
             assign_result = bbox_assigner.assign(anchors, gt_bboxes,
                                                  gt_bboxes_ignore, gt_labels)
             sampling_result = self.bbox_sampler.sample(assign_result, anchors,

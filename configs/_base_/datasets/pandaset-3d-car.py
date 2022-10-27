@@ -7,7 +7,7 @@ point_cloud_range = [0, -40, -2 - 0.4, 80, 40, 4 - 0.4]
 # class_names = ['Car', 'Pedestrian', 'Cyclist']
 class_names = ["Car"]
 dataset_type = "PandasetDataset"
-data_root = "data/pandaset_sim512/"
+data_root = "data/pandaset/"
 input_modality = dict(use_lidar=True, use_camera=False)
 file_client_args = dict(backend="disk")
 # Uncomment the following if use ceph or other file clients.
@@ -65,8 +65,8 @@ eval_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=4,
-    workers_per_gpu=4,
+    samples_per_gpu=6,
+    workers_per_gpu=8,
     train=dict(
         type="RepeatDataset",
         times=2,
@@ -78,6 +78,7 @@ data = dict(
             classes=class_names,
             modality=input_modality,
             test_mode=False,
+            filter_empty_gt=False,
             # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
             # and box_type_3d='Depth' in sunrgbd and scannet dataset.
             box_type_3d="LiDAR",

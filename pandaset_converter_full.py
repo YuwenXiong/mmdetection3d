@@ -243,17 +243,17 @@ def _fill_trainval_infos(scenes, max_sweeps=10):
             # obtain annotation
             cuboids_path = info["cuboids_path"]
             annotations = pickle.load(open(cuboids_path, "rb"))
-            try:
-                annotations2 = np.load(
-                    os.path.join(data_dir, "annotations", "cuboids", ("{:03d}.npy".format(frame_idx))), allow_pickle=True
-                ).item()
-            except:
-                print(cuboids_path)
-            # annotations = scene.cuboids.data
+            # try:
+            #     annotations2 = np.load(
+            #         os.path.join(data_dir, "annotations", "cuboids", ("{:03d}.npy".format(frame_idx))), allow_pickle=True
+            #     ).item()
+            # except:
+            #     print(cuboids_path)
+            # # annotations = scene.cuboids.data
 
-            annotations = {k: v for k, v in annotations.items() if k in annotations2}
-            for k in annotations.keys():
-                annotations[k]['num_pts'] = annotations2[k][0]['num_pts']
+            # annotations = {k: v for k, v in annotations.items() if k in annotations2}
+            # for k in annotations.keys():
+            #     annotations[k]['num_pts'] = annotations2[k][0]['num_pts']
 
             locs = np.array(
                 [label["position"] for _, label in annotations.items() if label["cuboids_sensor_id"] != 1]

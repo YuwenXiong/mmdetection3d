@@ -15,7 +15,7 @@ model = dict(
         type="ResNet",
         in_channels=40,
         groups_in_stem=1,
-        stride_in_stem=1,
+        stride_in_stem=2,
         channels_in_stem=[64, 64, 64],
         blocks_per_stage=[3, 3, 3],
         block_type="BasicBlock",
@@ -58,7 +58,7 @@ model = dict(
 
 # dataset settings
 
-optimizer = dict(type="AdamW", lr=0.001 / 4, weight_decay=1e-4)
+optimizer = dict(type="AdamW", lr=0.001 / 2, weight_decay=1e-4)
 runner = dict(type="EpochBasedRunner", max_epochs=24)
 
 # Use evaluation interval=2 reduce the number of evaluation timese
