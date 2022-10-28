@@ -38,6 +38,90 @@ def transform(pts: torch.Tensor, tr: torch.Tensor) -> torch.Tensor:
     return pts_tr
 
 
+from mmdet3d.datasets.pipelines.transforms_3d import ObjectRangeFilter
+
+roi_filter = ObjectRangeFilter([0, -40, -2.0 - 0.4, 80, 40, 4.0 - 0.4])
+
+
+def transform_annotations_to_kitti_format(annos, map_name_to_kitti=None, info_with_fakelidar=False, **kwargs):
+    """
+    Args:
+        annos:
+        map_name_to_kitti: dict, map name to KITTI names (Car, Pedestrian, Cyclist)
+        info_with_fakelidar:
+    Returns:
+    """
+    for anno in annos:
+        if "name" not in anno:
+            anno["name"] = anno["gt_names"]
+            anno.pop("gt_names")
+
+        for k in range(anno["name"].shape[0]):
+            if anno["name"][k] in map_name_to_kitti:
+                anno["name"][k] = map_name_to_kitti[anno["name"][k]]
+            else:
+                anno["name"][k] = "Person_sitting"
+
+        if "boxes_lidar" in anno:
+            gt_boxes_lidar = anno["boxes_lidar"].copy()
+        elif "gt_boxes_lidar" in anno:
+            gt_boxes_lidar = anno["gt_boxes_lidar"].copy()
+        else:
+            gt_boxes_lidar = anno["gt_boxes"].copy()
+
+        # # filter by fov
+        # if kwargs.get("is_gt", None) and kwargs.get("GT_FILTER", None):
+        #     if kwargs.get("FOV_FILTER", None):
+        #         gt_boxes_lidar = filter_by_fov(anno, gt_boxes_lidar, kwargs)
+
+        # # filter by range
+        # if kwargs.get("GT_FILTER", None) and kwargs.get("RANGE_FILTER", None):
+        #     point_cloud_range = kwargs["RANGE_FILTER"]
+        #     gt_boxes_lidar = filter_by_range(anno, gt_boxes_lidar, point_cloud_range, kwargs["is_gt"])
+
+        #         roi_filter = ObjectRangeFilter([0, -40, -2.0 - 0.4, 80, 40, 4.0 - 0.4])
+        #         roi_filter()
+        mask = (
+            (gt_boxes_lidar[:, 0] > 0)
+            & (gt_boxes_lidar[:, 0] < 80)
+            & (gt_boxes_lidar[:, 1] > -40)
+            & (gt_boxes_lidar[:, 1] < 40) & (anno['num_lidar_pts'] != 0)
+        )
+        anno["name"] = anno["name"][mask]
+        gt_boxes_lidar = gt_boxes_lidar[mask]
+
+        if kwargs.get("GT_FILTER", None):
+            anno["gt_boxes_lidar"] = gt_boxes_lidar
+
+        anno["bbox"] = np.zeros((len(anno["name"]), 4))
+        anno["bbox"][:, 2:4] = 50  # [0, 0, 50, 50]
+        anno["truncated"] = np.zeros(len(anno["name"]))
+        anno["occluded"] = np.zeros(len(anno["name"]))
+
+        if len(gt_boxes_lidar) > 0:
+            if info_with_fakelidar:
+                gt_boxes_lidar = box_utils.boxes3d_kitti_fakelidar_to_lidar(gt_boxes_lidar)
+
+            # gt_boxes_lidar[:, 2] += gt_boxes_lidar[:, 5] / 2
+            anno["location"] = np.zeros((gt_boxes_lidar.shape[0], 3))
+            anno["location"][:, 0] = -gt_boxes_lidar[:, 1]  # x = -y_lidar
+            anno["location"][:, 1] = -gt_boxes_lidar[:, 2]  # y = -z_lidar
+            anno["location"][:, 2] = gt_boxes_lidar[:, 0]  # z = x_lidar
+            # anno["location"][:, 0] = gt_boxes_lidar[:, 0]  # x = -y_lidar
+            # anno["location"][:, 1] = gt_boxes_lidar[:, 1]  # y = -z_lidar
+            # anno["location"][:, 2] = gt_boxes_lidar[:, 2]  # z = x_lidar
+            dxdydz = gt_boxes_lidar[:, 3:6]
+            anno["dimensions"] = dxdydz[:, [0, 2, 1]]  # lwh ==> lhw
+            # anno["dimensions"] = dxdydz[:, [0, 1, 2]]  # lwh ==> lhw
+            anno["rotation_y"] = -gt_boxes_lidar[:, 6] - np.pi / 2.0
+            anno["alpha"] = -np.arctan2(-gt_boxes_lidar[:, 1], gt_boxes_lidar[:, 0]) + anno["rotation_y"]
+        else:
+            anno["location"] = anno["dimensions"] = np.zeros((0, 3))
+            anno["rotation_y"] = anno["alpha"] = np.zeros(0)
+
+    return annos
+
+
 @DATASETS.register_module()
 class PandasetDataset(Custom3DDataset):
     r"""Pandaset Dataset.
@@ -276,8 +360,8 @@ class PandasetDataset(Custom3DDataset):
             mask = info["valid_flag"]
         else:
             mask = info["num_lidar_pts"] > 0
-        gt_bboxes_3d = info["gt_boxes"][mask]
-        gt_names_3d = info["gt_names"][mask]
+        gt_bboxes_3d = info["gt_boxes"]# [mask]
+        gt_names_3d = info["gt_names"]# [mask]
         gt_labels_3d = []
         for cat in gt_names_3d:
             if cat in self.CLASSES:
@@ -285,6 +369,7 @@ class PandasetDataset(Custom3DDataset):
             else:
                 gt_labels_3d.append(-1)
         gt_labels_3d = np.array(gt_labels_3d)
+        gt_labels_3d[~mask] = -1
 
         # the nuscenes box center is [0.5, 0.5, 0.5], we change it to be
         # the same as KITTI (0.5, 0.5, 0)
@@ -497,8 +582,8 @@ class PandasetDataset(Custom3DDataset):
                 "name": [],
                 "truncated": [],
                 "occluded": [],
-                # 'alpha': [],
-                # 'bbox': [],
+                "alpha": [],
+                # "bbox": [],
                 "dimensions": [],
                 "location": [],
                 "rotation_y": [],
@@ -514,24 +599,28 @@ class PandasetDataset(Custom3DDataset):
                     anno["name"].append(class_names[int(label)])
                     anno["truncated"].append(0.0)
                     anno["occluded"].append(0)
-                    # anno['alpha'].append(
-                    #     -np.arctan2(-box_lidar[1], box_lidar[0]) + box[6])
+                    anno["alpha"].append(-10)
                     # anno['bbox'].append(bbox)
-                    anno["dimensions"].append(box[3:6].numpy())
-                    anno["location"].append(box[:3].numpy())
-                    anno["rotation_y"].append(box[6].item())
+                    anno["dimensions"].append(box[3:6][[0, 2, 1]].numpy())
+                    anno["location"].append(np.array([-box[1], -box[2], box[0]]))
+                    # anno["dimensions"].append(box[3:6].numpy())
+                    # anno["location"].append(box[0:3])
+                    # anno["rotation_y"].append(box[6])
+                    anno["rotation_y"].append(-box[6] - np.pi / 2.0)
                     # anno['boxes_3d'].append(box)
                     anno["score"].append(score.item())
 
                 anno = {k: np.stack(v) for k, v in anno.items()}
+                anno["bbox"] = np.zeros((len(anno["name"]), 4))
+                anno["bbox"][:, 2:4] = 50  # [0, 0, 50, 50]
                 annos.append(anno)
             else:
                 anno = {
                     "name": np.array([]),
                     "truncated": np.array([]),
                     "occluded": np.array([]),
-                    # 'alpha': np.array([]),
-                    # 'bbox': np.zeros([0, 4]),
+                    "alpha": np.array([]),
+                    "bbox": np.zeros([0, 4]),
                     "dimensions": np.zeros([0, 3]),
                     "location": np.zeros([0, 3]),
                     "rotation_y": np.array([]),
@@ -633,48 +722,66 @@ class PandasetDataset(Custom3DDataset):
         # import pdb; pdb.set_trace()
 
         # pipeline = self._build_default_pipeline()
-        evaluator = Evaluator(ap_thresholds=[0.5, 1.0, 2.0, 4.0])
-        for i, result in enumerate(results):
-            if "pts_bbox" in result.keys():
-                result = result["pts_bbox"]
-            #     # data_info = self.data_infos[i]
-            #     # pts_path = data_info['lidar_path']
-            #     # file_name = osp.split(pts_path)[-1].split('.')[0]
-            #     # points = self._extract_data(i, pipeline, 'points').numpy()
-            #     # # for now we convert points into depth mode
-            #     # points = Coord3DMode.convert_point(points, Coord3DMode.LIDAR,
-            #     #                                    Coord3DMode.DEPTH)
-            #     # inds = result['scores_3d'] > 0.1
-            #     # gt_bboxes = self.get_ann_info(i)['gt_bboxes_3d'].tensor.numpy()
-            #     # show_gt_bboxes = Box3DMode.convert(gt_bboxes, Box3DMode.LIDAR,
-            #     #                                    Box3DMode.DEPTH)
-            #     # pred_bboxes = result['boxes_3d'][inds].tensor.numpy()
-            #     # show_pred_bboxes = Box3DMode.convert(pred_bboxes, Box3DMode.LIDAR,
-            #     #                                      Box3DMode.DEPTH)
+        # evaluator = Evaluator(ap_thresholds=[0.5, 1.0, 2.0, 4.0])
+        # for i, result in enumerate(results):
+        #     if "pts_bbox" in result.keys():
+        #         result = result["pts_bbox"]
+        #     #     # data_info = self.data_infos[i]
+        #     #     # pts_path = data_info['lidar_path']
+        #     #     # file_name = osp.split(pts_path)[-1].split('.')[0]
+        #     #     # points = self._extract_data(i, pipeline, 'points').numpy()
+        #     #     # # for now we convert points into depth mode
+        #     #     # points = Coord3DMode.convert_point(points, Coord3DMode.LIDAR,
+        #     #     #                                    Coord3DMode.DEPTH)
+        #     #     # inds = result['scores_3d'] > 0.1
+        #     #     # gt_bboxes = self.get_ann_info(i)['gt_bboxes_3d'].tensor.numpy()
+        #     #     # show_gt_bboxes = Box3DMode.convert(gt_bboxes, Box3DMode.LIDAR,
+        #     #     #                                    Box3DMode.DEPTH)
+        #     #     # pred_bboxes = result['boxes_3d'][inds].tensor.numpy()
+        #     #     # show_pred_bboxes = Box3DMode.convert(pred_bboxes, Box3DMode.LIDAR,
+        #     #     #                                      Box3DMode.DEPTH)
 
-            from mmdet3d.datasets.pipelines.transforms_3d import ObjectRangeFilter
+        #     from mmdet3d.datasets.pipelines.transforms_3d import ObjectRangeFilter
 
-            roi_filter = ObjectRangeFilter([0, -39.68, -1.5, 79.36, 39.68, 5.5])
-            gt_label = roi_filter(self.get_ann_info(i))
-            # import ipdb; ipdb.set_trace()
-            # result["boxes_3d"] = gt_label["gt_bboxes_3d"]
-            # result["scores_3d"] = torch.ones((result["boxes_3d"].tensor.shape[0],))
-            # result["labels_3d"] = torch.zeros_like(result["scores_3d"]).long()
-            evaluator.append(result, gt_label)
+        #     roi_filter = ObjectRangeFilter([0, -39.68, -1.5, 79.36, 39.68, 5.5])
+        #     gt_label = roi_filter(self.get_ann_info(i))
+        #     # import ipdb; ipdb.set_trace()
+        #     # result["boxes_3d"] = gt_label["gt_bboxes_3d"]
+        #     # result["scores_3d"] = torch.ones((result["boxes_3d"].tensor.shape[0],))
+        #     # result["labels_3d"] = torch.zeros_like(result["scores_3d"]).long()
+        #     evaluator.append(result, gt_label)
 
-            # evaluator.append(result, self.get_ann_info(i))
+        #     # evaluator.append(result, self.get_ann_info(i))
 
-        result = evaluator.evaluate()
-        result_df = result.as_dataframe()
-        res_dict = {}
-        for key in result_df.keys():
-            res_dict[str(key)] = result_df[key][0]
-        print(res_dict)
-        return res_dict
+        # result = evaluator.evaluate()
+        # result_df = result.as_dataframe()
+        # res_dict = {}
+        # for key in result_df.keys():
+        #     res_dict[str(key)] = result_df[key][0]
+        # print(res_dict)
+        # return res_dict
+
+        from mmdet3d.datasets.pipelines.transforms_3d import ObjectRangeFilter
+
+        roi_filter = ObjectRangeFilter([0, -40, -2.0 - 0.4, 80, 40, 4.0 - 0.4])
 
         result_files, tmp_dir = self.format_results(results, jsonfile_prefix)
-        gt_annos = [{"gt_boxes": info["gt_boxes"], "gt_names": info["gt_names"]} for info in self.data_infos]
-        ap_result_str, ap_dict = kitti_eval(gt_annos, result_files, self.CLASSES, eval_types="3d")
+        # gt_annos = [
+        #     {
+        #         "gt_boxes": roi_filter(self.get_ann_info(i))["gt_bboxes_3d"].tensor.numpy(),
+        #         "gt_names": np.array(self.CLASSES)[roi_filter(self.get_ann_info(i))["gt_labels_3d"]],
+        #     }
+        #     for i in range(len(self))
+        # ]
+        import copy
+
+        gt_annos = transform_annotations_to_kitti_format(copy.deepcopy(self.data_infos), {"Car": "Car"})
+        import pickle as pkl
+
+        pkl.dump((gt_annos, result_files), open("/home/yuwen/mmdetection3d/results.pkl", "wb"))
+        from mmdet3d.core.evaluation import kitti_eval
+
+        ap_result_str, ap_dict = kitti_eval(gt_annos, result_files, self.CLASSES, eval_types=["bev", "3d"])
         print(ap_result_str)
         return ap_dict
 
@@ -1360,7 +1467,7 @@ def image_box_overlap(boxes, query_boxes, criterion=-1):
 
 
 def bev_box_overlap(boxes, qboxes, criterion=-1):
-    from .rotate_iou import rotate_iou_gpu_eval
+    from mmdet3d.core.evaluation.kitti_utils.rotate_iou import rotate_iou_gpu_eval
 
     riou = rotate_iou_gpu_eval(boxes, qboxes, criterion)
     return riou
@@ -1611,10 +1718,11 @@ def calculate_iou_partly(gt_annos, dt_annos, metric, num_parts=50):
             dt_boxes = np.concatenate([a["bbox"] for a in dt_annos_part], 0)
             overlap_part = image_box_overlap(gt_boxes, dt_boxes)
         elif metric == 1:
-            loc = np.concatenate([a["location"][:, [0, 2]] for a in gt_annos_part], 0)
-            dims = np.concatenate([a["dimensions"][:, [0, 2]] for a in gt_annos_part], 0)
-            rots = np.concatenate([a["rotation_y"] for a in gt_annos_part], 0)
-            gt_boxes = np.concatenate([loc, dims, rots[..., np.newaxis]], axis=1)
+            # loc = np.concatenate([a["location"][:, [0, 2]] for a in gt_annos_part], 0)
+            # dims = np.concatenate([a["dimensions"][:, [0, 2]] for a in gt_annos_part], 0)
+            # rots = np.concatenate([a["rotation_y"] for a in gt_annos_part], 0)
+            # gt_boxes = np.concatenate([loc, dims, rots[..., np.newaxis]], axis=1)
+            gt_boxes = np.concatenate([a["gt_boxes"][:, [0, 2, 3, 5, 6]] for a in gt_annos_part], 0)
             loc = np.concatenate([a["location"][:, [0, 2]] for a in dt_annos_part], 0)
             dims = np.concatenate([a["dimensions"][:, [0, 2]] for a in dt_annos_part], 0)
             rots = np.concatenate([a["rotation_y"] for a in dt_annos_part], 0)
@@ -1860,124 +1968,124 @@ def do_coco_style_eval(gt_annos, dt_annos, current_classes, overlap_ranges, comp
     return mAP_bbox, mAP_bev, mAP_3d, mAP_aos
 
 
-def kitti_eval(gt_annos, dt_annos, current_classes, eval_types=["bbox", "bev", "3d"]):
-    """KITTI evaluation.
+# def kitti_eval(gt_annos, dt_annos, current_classes, eval_types=["bbox", "bev", "3d"]):
+#     """KITTI evaluation.
 
-    Args:
-        gt_annos (list[dict]): Contain gt information of each sample.
-        dt_annos (list[dict]): Contain detected information of each sample.
-        current_classes (list[str]): Classes to evaluation.
-        eval_types (list[str], optional): Types to eval.
-            Defaults to ['bbox', 'bev', '3d'].
+#     Args:
+#         gt_annos (list[dict]): Contain gt information of each sample.
+#         dt_annos (list[dict]): Contain detected information of each sample.
+#         current_classes (list[str]): Classes to evaluation.
+#         eval_types (list[str], optional): Types to eval.
+#             Defaults to ['bbox', 'bev', '3d'].
 
-    Returns:
-        tuple: String and dict of evaluation results.
-    """
-    assert len(eval_types) > 0, "must contain at least one evaluation type"
-    if "aos" in eval_types:
-        assert "bbox" in eval_types, "must evaluate bbox when evaluating aos"
-    overlap_0_7 = np.array([[0.7, 0.5, 0.5, 0.7, 0.5], [0.7, 0.5, 0.5, 0.7, 0.5], [0.7, 0.5, 0.5, 0.7, 0.5]])
-    overlap_0_5 = np.array([[0.7, 0.5, 0.5, 0.7, 0.5], [0.5, 0.25, 0.25, 0.5, 0.25], [0.5, 0.25, 0.25, 0.5, 0.25]])
-    min_overlaps = np.stack([overlap_0_7, overlap_0_5], axis=0)  # [2, 3, 5]
-    class_to_name = {
-        0: "Car",
-        1: "Pedestrian",
-        2: "Cyclist",
-        # 3: 'Van',
-        # 4: 'Person_sitting',
-    }
-    name_to_class = {v: n for n, v in class_to_name.items()}
-    if not isinstance(current_classes, (list, tuple)):
-        current_classes = [current_classes]
-    current_classes_int = []
-    for curcls in current_classes:
-        if isinstance(curcls, str):
-            current_classes_int.append(name_to_class[curcls])
-        else:
-            current_classes_int.append(curcls)
-    current_classes = current_classes_int
-    min_overlaps = min_overlaps[:, :, current_classes]
-    result = ""
-    # check whether alpha is valid
-    compute_aos = False
-    # pred_alpha = False
-    # valid_alpha_gt = False
-    # for anno in dt_annos:
-    #     mask = (anno['alpha'] != -10)
-    #     if anno['alpha'][mask].shape[0] != 0:
-    #         pred_alpha = True
-    #         break
-    # for anno in gt_annos:
-    #     if anno['alpha'][0] != -10:
-    #         valid_alpha_gt = True
-    #         break
-    # compute_aos = (pred_alpha and valid_alpha_gt)
-    if compute_aos:
-        eval_types.append("aos")
+#     Returns:
+#         tuple: String and dict of evaluation results.
+#     """
+#     assert len(eval_types) > 0, "must contain at least one evaluation type"
+#     if "aos" in eval_types:
+#         assert "bbox" in eval_types, "must evaluate bbox when evaluating aos"
+#     overlap_0_7 = np.array([[0.7, 0.5, 0.5, 0.7, 0.5], [0.7, 0.5, 0.5, 0.7, 0.5], [0.7, 0.5, 0.5, 0.7, 0.5]])
+#     overlap_0_5 = np.array([[0.7, 0.5, 0.5, 0.7, 0.5], [0.5, 0.25, 0.25, 0.5, 0.25], [0.5, 0.25, 0.25, 0.5, 0.25]])
+#     min_overlaps = np.stack([overlap_0_7, overlap_0_5], axis=0)  # [2, 3, 5]
+#     class_to_name = {
+#         0: "Car",
+#         1: "Pedestrian",
+#         2: "Cyclist",
+#         # 3: 'Van',
+#         # 4: 'Person_sitting',
+#     }
+#     name_to_class = {v: n for n, v in class_to_name.items()}
+#     if not isinstance(current_classes, (list, tuple)):
+#         current_classes = [current_classes]
+#     current_classes_int = []
+#     for curcls in current_classes:
+#         if isinstance(curcls, str):
+#             current_classes_int.append(name_to_class[curcls])
+#         else:
+#             current_classes_int.append(curcls)
+#     current_classes = current_classes_int
+#     min_overlaps = min_overlaps[:, :, current_classes]
+#     result = ""
+#     # check whether alpha is valid
+#     compute_aos = False
+#     # pred_alpha = False
+#     # valid_alpha_gt = False
+#     # for anno in dt_annos:
+#     #     mask = (anno['alpha'] != -10)
+#     #     if anno['alpha'][mask].shape[0] != 0:
+#     #         pred_alpha = True
+#     #         break
+#     # for anno in gt_annos:
+#     #     if anno['alpha'][0] != -10:
+#     #         valid_alpha_gt = True
+#     #         break
+#     # compute_aos = (pred_alpha and valid_alpha_gt)
+#     if compute_aos:
+#         eval_types.append("aos")
 
-    mAPbbox, mAPbev, mAP3d, mAPaos = do_eval(gt_annos, dt_annos, current_classes, min_overlaps, eval_types)
+#     mAPbbox, mAPbev, mAP3d, mAPaos = do_eval(gt_annos, dt_annos, current_classes, min_overlaps, eval_types)
 
-    ret_dict = {}
-    difficulty = ["easy", "moderate", "hard"]
-    for j, curcls in enumerate(current_classes):
-        # mAP threshold array: [num_minoverlap, metric, class]
-        # mAP result: [num_class, num_diff, num_minoverlap]
-        curcls_name = class_to_name[curcls]
-        for i in range(min_overlaps.shape[0]):
-            # prepare results for print
-            result += "{} AP@{:.2f}, {:.2f}, {:.2f}:\n".format(curcls_name, *min_overlaps[i, :, j])
-            if mAPbbox is not None:
-                result += "bbox AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAPbbox[j, :, i])
-            if mAPbev is not None:
-                result += "bev  AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAPbev[j, :, i])
-            if mAP3d is not None:
-                result += "3d   AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAP3d[j, :, i])
+#     ret_dict = {}
+#     difficulty = ["easy", "moderate", "hard"]
+#     for j, curcls in enumerate(current_classes):
+#         # mAP threshold array: [num_minoverlap, metric, class]
+#         # mAP result: [num_class, num_diff, num_minoverlap]
+#         curcls_name = class_to_name[curcls]
+#         for i in range(min_overlaps.shape[0]):
+#             # prepare results for print
+#             result += "{} AP@{:.2f}, {:.2f}, {:.2f}:\n".format(curcls_name, *min_overlaps[i, :, j])
+#             if mAPbbox is not None:
+#                 result += "bbox AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAPbbox[j, :, i])
+#             if mAPbev is not None:
+#                 result += "bev  AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAPbev[j, :, i])
+#             if mAP3d is not None:
+#                 result += "3d   AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAP3d[j, :, i])
 
-            if compute_aos:
-                result += "aos  AP:{:.2f}, {:.2f}, {:.2f}\n".format(*mAPaos[j, :, i])
+#             if compute_aos:
+#                 result += "aos  AP:{:.2f}, {:.2f}, {:.2f}\n".format(*mAPaos[j, :, i])
 
-            # prepare results for logger
-            for idx in range(3):
-                if i == 0:
-                    postfix = f"{difficulty[idx]}_strict"
-                else:
-                    postfix = f"{difficulty[idx]}_loose"
-                prefix = f"KITTI/{curcls_name}"
-                if mAP3d is not None:
-                    ret_dict[f"{prefix}_3D_{postfix}"] = mAP3d[j, idx, i]
-                if mAPbev is not None:
-                    ret_dict[f"{prefix}_BEV_{postfix}"] = mAPbev[j, idx, i]
-                if mAPbbox is not None:
-                    ret_dict[f"{prefix}_2D_{postfix}"] = mAPbbox[j, idx, i]
+#             # prepare results for logger
+#             for idx in range(3):
+#                 if i == 0:
+#                     postfix = f"{difficulty[idx]}_strict"
+#                 else:
+#                     postfix = f"{difficulty[idx]}_loose"
+#                 prefix = f"KITTI/{curcls_name}"
+#                 if mAP3d is not None:
+#                     ret_dict[f"{prefix}_3D_{postfix}"] = mAP3d[j, idx, i]
+#                 if mAPbev is not None:
+#                     ret_dict[f"{prefix}_BEV_{postfix}"] = mAPbev[j, idx, i]
+#                 if mAPbbox is not None:
+#                     ret_dict[f"{prefix}_2D_{postfix}"] = mAPbbox[j, idx, i]
 
-    # calculate mAP over all classes if there are multiple classes
-    if len(current_classes) > 1:
-        # prepare results for print
-        result += "\nOverall AP@{}, {}, {}:\n".format(*difficulty)
-        if mAPbbox is not None:
-            mAPbbox = mAPbbox.mean(axis=0)
-            result += "bbox AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAPbbox[:, 0])
-        if mAPbev is not None:
-            mAPbev = mAPbev.mean(axis=0)
-            result += "bev  AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAPbev[:, 0])
-        if mAP3d is not None:
-            mAP3d = mAP3d.mean(axis=0)
-            result += "3d   AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAP3d[:, 0])
-        if compute_aos:
-            mAPaos = mAPaos.mean(axis=0)
-            result += "aos  AP:{:.2f}, {:.2f}, {:.2f}\n".format(*mAPaos[:, 0])
+#     # calculate mAP over all classes if there are multiple classes
+#     if len(current_classes) > 1:
+#         # prepare results for print
+#         result += "\nOverall AP@{}, {}, {}:\n".format(*difficulty)
+#         if mAPbbox is not None:
+#             mAPbbox = mAPbbox.mean(axis=0)
+#             result += "bbox AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAPbbox[:, 0])
+#         if mAPbev is not None:
+#             mAPbev = mAPbev.mean(axis=0)
+#             result += "bev  AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAPbev[:, 0])
+#         if mAP3d is not None:
+#             mAP3d = mAP3d.mean(axis=0)
+#             result += "3d   AP:{:.4f}, {:.4f}, {:.4f}\n".format(*mAP3d[:, 0])
+#         if compute_aos:
+#             mAPaos = mAPaos.mean(axis=0)
+#             result += "aos  AP:{:.2f}, {:.2f}, {:.2f}\n".format(*mAPaos[:, 0])
 
-        # prepare results for logger
-        for idx in range(3):
-            postfix = f"{difficulty[idx]}"
-            if mAP3d is not None:
-                ret_dict[f"KITTI/Overall_3D_{postfix}"] = mAP3d[idx, 0]
-            if mAPbev is not None:
-                ret_dict[f"KITTI/Overall_BEV_{postfix}"] = mAPbev[idx, 0]
-            if mAPbbox is not None:
-                ret_dict[f"KITTI/Overall_2D_{postfix}"] = mAPbbox[idx, 0]
+#         # prepare results for logger
+#         for idx in range(3):
+#             postfix = f"{difficulty[idx]}"
+#             if mAP3d is not None:
+#                 ret_dict[f"KITTI/Overall_3D_{postfix}"] = mAP3d[idx, 0]
+#             if mAPbev is not None:
+#                 ret_dict[f"KITTI/Overall_BEV_{postfix}"] = mAPbev[idx, 0]
+#             if mAPbbox is not None:
+#                 ret_dict[f"KITTI/Overall_2D_{postfix}"] = mAPbbox[idx, 0]
 
-    return result, ret_dict
+#     return result, ret_dict
 
 
 def kitti_eval_coco_style(gt_annos, dt_annos, current_classes):
