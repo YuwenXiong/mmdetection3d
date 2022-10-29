@@ -181,9 +181,9 @@ class VoxelNet(SingleStage3DDetector):
             test_cfg=test_cfg,
             init_cfg=init_cfg,
             pretrained=pretrained)
-        # self.voxel_layer = Voxelization(**voxel_layer)
-        # self.voxel_encoder = builder.build_voxel_encoder(voxel_encoder)
-        # self.middle_encoder = builder.build_middle_encoder(middle_encoder)
+        self.voxel_layer = Voxelization(**voxel_layer)
+        self.voxel_encoder = builder.build_voxel_encoder(voxel_encoder)
+        self.middle_encoder = builder.build_middle_encoder(middle_encoder)
         self.voxelizer = Voxelizer(x_min=voxel_layer['point_cloud_range'][0], y_min=voxel_layer['point_cloud_range'][1], z_min=-2, x_max=voxel_layer['point_cloud_range'][3], y_max=voxel_layer['point_cloud_range'][4], z_max=4, step=voxel_layer['voxel_size'][0], z_step=0.15)
 
         # # self.preprocessor = LidarVQGAN()
@@ -206,12 +206,12 @@ class VoxelNet(SingleStage3DDetector):
         """Extract features from points."""
         for p in points:
             p[:, 2] += z_offset
-        # voxels, num_points, coors = self.voxelize(points)
-        # voxel_features = self.voxel_encoder(voxels, num_points, coors)
-        # batch_size = coors[-1, 0].item() + 1
-        # x = self.middle_encoder(voxel_features, coors, batch_size)
+        voxels, num_points, coors = self.voxelize(points)
+        voxel_features = self.voxel_encoder(voxels, num_points, coors)
+        batch_size = coors[-1, 0].item() + 1
+        x = self.middle_encoder(voxel_features, coors, batch_size)
 
-        x = self.voxelizer([[_] for _ in points])
+        # x = self.voxelizer([[_] for _ in points])
         if self.preprocessor is not None:
             with torch.no_grad():
                 pad_x = x.new_zeros((x.shape[0], x.shape[1], 512, 512))
