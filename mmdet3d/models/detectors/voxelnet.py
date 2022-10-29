@@ -13,8 +13,8 @@ from .single_stage import SingleStage3DDetector
 from mmdet3d.models.detectors.vqvae import LidarVQGAN
 from mmdet3d.models.detectors.vqvit import LidarVQViT
 
-# z_offset = 0.0 # waymo train/val
-z_offset = 0.4
+z_offset = 0.0 # waymo train/val
+# z_offset = 0.4
 # z_offset = 1.6
 
 class Voxelizer(torch.nn.Module):
