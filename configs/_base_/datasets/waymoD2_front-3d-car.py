@@ -2,10 +2,10 @@
 # D5 in the config name means the whole dataset is divided into 5 folds
 # We only use one fold for efficient experiments
 dataset_type = 'WaymoDataset'
-# data_root = 's3://waabi-live-training-datasets/non_commercial_use_only/waymo_kitti_format/'
-data_root = '/mnt/data/waymo_dataset/kitti_format/'
-file_client_args = dict(backend='disk')
-# file_client_args = dict(prefix='awss3', base_uri=data_root)
+data_root = 's3://waabi-live-training-datasets/non_commercial_use_only/waymo_kitti_format/'
+# data_root = '/mnt/data/waymo_dataset/kitti_format/'
+# file_client_args = dict(backend='disk')
+file_client_args = dict(prefix='awss3', base_uri=data_root)
 # Uncomment the following if use ceph or other file clients.
 # See https://mmcv.readthedocs.io/en/latest/api.html#mmcv.fileio.FileClient
 # for more details.
@@ -105,7 +105,7 @@ eval_pipeline = [
 
 data = dict(
     samples_per_gpu=4,
-    workers_per_gpu=8,
+    workers_per_gpu=4,
     persistent_workers=True,
     train=dict(
         type='RepeatDataset',

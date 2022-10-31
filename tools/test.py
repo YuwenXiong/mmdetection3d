@@ -223,20 +223,24 @@ def main():
         # segmentation dataset has `PALETTE` attribute
         model.PALETTE = dataset.PALETTE
 
-    if not distributed:
-        model = MMDataParallel(model, device_ids=cfg.gpu_ids)
-        outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
-    else:
-        model = MMDistributedDataParallel(
-            model.cuda(), device_ids=[torch.cuda.current_device()], broadcast_buffers=False
-        )
-        outputs = multi_gpu_test(model, data_loader, args.tmpdir, args.gpu_collect)
+    if not args.out or not os.path.exists(args.out):
+        if not distributed:
+            model = MMDataParallel(model, device_ids=cfg.gpu_ids)
+            outputs = single_gpu_test(model, data_loader, args.show, args.show_dir)
+        else:
+            model = MMDistributedDataParallel(
+                model.cuda(), device_ids=[torch.cuda.current_device()], broadcast_buffers=False
+            )
+            outputs = multi_gpu_test(model, data_loader, args.tmpdir, args.gpu_collect)
 
     rank, _ = get_dist_info()
     if rank == 0:
         if args.out:
-            print(f"\nwriting results to {args.out}")
-            mmcv.dump(outputs, args.out)
+            if os.path.exists(args.out):
+                outputs = mmcv.load(args.out)
+            else:
+                print(f"\nwriting results to {args.out}")
+                mmcv.dump(outputs, args.out)
         kwargs = {} if args.eval_options is None else args.eval_options
         if args.format_only:
             dataset.format_results(outputs, **kwargs)
