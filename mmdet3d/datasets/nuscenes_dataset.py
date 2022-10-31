@@ -12,6 +12,91 @@ from ..core.bbox import Box3DMode, Coord3DMode, LiDARInstance3DBoxes
 from .builder import DATASETS
 from .custom_3d import Custom3DDataset
 from .pipelines import Compose
+import copy
+
+def transform_annotations_to_kitti_format(annos, map_name_to_kitti=None, info_with_fakelidar=False, **kwargs):
+    """
+    Args:
+        annos:
+        map_name_to_kitti: dict, map name to KITTI names (Car, Pedestrian, Cyclist)
+        info_with_fakelidar:
+    Returns:
+    """
+    for anno in annos:
+        if "name" not in anno:
+            anno["name"] = anno["gt_names"]
+            anno.pop("gt_names")
+
+        if map_name_to_kitti is not None:
+            for k in range(anno["name"].shape[0]):
+                if anno["name"][k] in map_name_to_kitti:
+                    anno["name"][k] = map_name_to_kitti[anno["name"][k]]
+                else:
+                    anno["name"][k] = "Person_sitting"
+
+        if "boxes_lidar" in anno:
+            gt_boxes_lidar = anno["boxes_lidar"].copy()
+        elif "gt_boxes_lidar" in anno:
+            gt_boxes_lidar = anno["gt_boxes_lidar"].copy()
+        else:
+            gt_boxes_lidar = anno["gt_boxes"].copy()
+
+        # # filter by fov
+        # if kwargs.get("is_gt", None) and kwargs.get("GT_FILTER", None):
+        #     if kwargs.get("FOV_FILTER", None):
+        #         gt_boxes_lidar = filter_by_fov(anno, gt_boxes_lidar, kwargs)
+
+        # # filter by range
+        # if kwargs.get("GT_FILTER", None) and kwargs.get("RANGE_FILTER", None):
+        #     point_cloud_range = kwargs["RANGE_FILTER"]
+        #     gt_boxes_lidar = filter_by_range(anno, gt_boxes_lidar, point_cloud_range, kwargs["is_gt"])
+
+        #         roi_filter = ObjectRangeFilter([0, -40, -2.0 - 0.4, 80, 40, 4.0 - 0.4])
+        #         roi_filter()
+        mask = (
+            (gt_boxes_lidar[:, 0] > -50)
+            & (gt_boxes_lidar[:, 0] < 50)
+            & (gt_boxes_lidar[:, 1] > -50)
+            & (gt_boxes_lidar[:, 1] < 50) #  & (anno['num_points_in_gt'] != 0)
+        )
+        anno["name"] = anno["name"][mask]
+        gt_boxes_lidar = gt_boxes_lidar[mask]
+
+        if kwargs.get("GT_FILTER", None):
+            anno["gt_boxes_lidar"] = gt_boxes_lidar
+
+        anno["bbox"] = np.zeros((len(anno["name"]), 4))
+        anno["bbox"][:, 2:4] = 50  # [0, 0, 50, 50]
+        anno["truncated"] = np.zeros(len(anno["name"]))
+        anno["occluded"] = np.zeros(len(anno["name"]))
+
+        if len(gt_boxes_lidar) > 0:
+            if info_with_fakelidar:
+                gt_boxes_lidar = box_utils.boxes3d_kitti_fakelidar_to_lidar(gt_boxes_lidar)
+
+            # gt_boxes_lidar[:, 2] += gt_boxes_lidar[:, 5] / 2
+            anno["location"] = np.zeros((gt_boxes_lidar.shape[0], 3))
+            anno["location"][:, 0] = -gt_boxes_lidar[:, 1]  # x = -y_lidar
+            anno["location"][:, 1] = -gt_boxes_lidar[:, 2]  # y = -z_lidar
+            anno["location"][:, 2] = gt_boxes_lidar[:, 0]  # z = x_lidar
+            # anno["location"][:, 0] = gt_boxes_lidar[:, 0]  # x = -y_lidar
+            # anno["location"][:, 1] = gt_boxes_lidar[:, 1]  # y = -z_lidar
+            # anno["location"][:, 2] = gt_boxes_lidar[:, 2]  # z = x_lidar
+            dxdydz = gt_boxes_lidar[:, 3:6]
+            anno["dimensions"] = dxdydz[:, [0, 2, 1]]  # lwh ==> lhw
+            # anno["dimensions"] = dxdydz[:, [0, 1, 2]]  # lwh ==> lhw
+            anno["rotation_y"] = -gt_boxes_lidar[:, 6] - np.pi / 2.0
+            anno["alpha"] = (-np.arctan2(-gt_boxes_lidar[:, 1], gt_boxes_lidar[:, 0]) + anno["rotation_y"]) * 0 - 10
+            if 'score' in anno:
+                anno['score'] = anno['score'][mask]
+            if 'scores_3d' in anno:
+                anno['score'] = anno['scores_3d'].numpy()[mask]
+        else:
+            anno["location"] = anno["dimensions"] = np.zeros((0, 3))
+            anno["rotation_y"] = anno["alpha"] = np.zeros(0)
+
+    return annos
+
 
 
 @DATASETS.register_module()
@@ -500,6 +585,36 @@ class NuScenesDataset(Custom3DDataset):
         Returns:
             dict[str, float]: Results of each evaluation metric.
         """
+
+
+        map_name_to_kitti = {
+            'car': 'Car',
+            'pedestrian': 'Pedestrian',
+            'truck': 'Truck',
+        }
+
+        from mmdet3d.core.evaluation import kitti_eval
+        gt_annos = copy.deepcopy([info for info in self.data_infos])
+        for i in range(len(gt_annos)):
+            gt_annos[i]['gt_boxes_lidar'] = self.get_ann_info(i)['gt_bboxes_3d'].tensor.numpy()
+            gt_annos[i]['gt_names'] = gt_annos[i]['gt_names'][gt_annos[i]['num_lidar_pts'] > 0]
+        gt_annos = transform_annotations_to_kitti_format(gt_annos, map_name_to_kitti)
+
+
+        result_files = copy.deepcopy(results)
+        for i in range(len(result_files)):
+            result_files[i]['boxes_lidar'] = result_files[i]['boxes_3d'].tensor.numpy()
+            result_files[i]['name'] = np.array(['car' for _ in range(result_files[i]['boxes_lidar'].shape[0])])
+
+        result_files = transform_annotations_to_kitti_format(result_files, map_name_to_kitti)
+        import ipdb; ipdb.set_trace()
+        ap_result_str, ap_dict = kitti_eval(
+            gt_annos,
+            result_files,
+            ['Car'],
+            eval_types=['bev', '3d'])
+        print_log('\n' + ap_result_str, logger=logger)
+
         result_files, tmp_dir = self.format_results(results, jsonfile_prefix)
 
         if isinstance(result_files, dict):

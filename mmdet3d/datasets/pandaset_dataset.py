@@ -778,7 +778,7 @@ class PandasetDataset(Custom3DDataset):
         gt_annos = transform_annotations_to_kitti_format(copy.deepcopy(self.data_infos), {"Car": "Car"})
         import pickle as pkl
 
-        pkl.dump((gt_annos, result_files), open("/home/yuwen/mmdetection3d/results.pkl", "wb"))
+        # pkl.dump((gt_annos, result_files), open("/home/yuwen/mmdetection3d/results.pkl", "wb"))
         from mmdet3d.core.evaluation import kitti_eval
 
         ap_result_str, ap_dict = kitti_eval(gt_annos, result_files, self.CLASSES, eval_types=["bev", "3d"])
