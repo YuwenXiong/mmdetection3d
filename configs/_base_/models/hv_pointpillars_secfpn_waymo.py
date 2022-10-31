@@ -23,7 +23,7 @@ model = dict(
         type='PointPillarsScatter', in_channels=64, output_shape=[468, 468]),
     backbone=dict(
         type='SECOND',
-        in_channels=64,
+        in_channels=40,
         norm_cfg=dict(type='naiveSyncBN2d', eps=1e-3, momentum=0.01),
         layer_nums=[3, 5, 5],
         layer_strides=[1, 2, 2],
