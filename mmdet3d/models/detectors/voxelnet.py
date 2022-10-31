@@ -272,11 +272,11 @@ class VoxelNet(SingleStage3DDetector):
         for box in gt_bboxes_3d:
             box.tensor[:, 2] += z_offset
 
-        gt_bboxes_ignore = []
-        for i in range(len(gt_bboxes_3d)):
-            gt_bboxes_ignore.append(gt_bboxes_3d[i][gt_labels_3d[i] == -1].tensor)
-            gt_bboxes_3d[i] = gt_bboxes_3d[i][gt_labels_3d[i] != -1]
-            gt_labels_3d[i] = gt_labels_3d[i][gt_labels_3d[i] != -1]
+        # gt_bboxes_ignore = []
+        # for i in range(len(gt_bboxes_3d)):
+        #     gt_bboxes_ignore.append(gt_bboxes_3d[i][gt_labels_3d[i] == -1].tensor)
+        #     gt_bboxes_3d[i] = gt_bboxes_3d[i][gt_labels_3d[i] != -1]
+        #     gt_labels_3d[i] = gt_labels_3d[i][gt_labels_3d[i] != -1]
         loss_inputs = outs + (gt_bboxes_3d, gt_labels_3d, img_metas)
         losses = self.bbox_head.loss(
             *loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore)
