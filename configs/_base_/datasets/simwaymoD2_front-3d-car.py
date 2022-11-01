@@ -15,7 +15,8 @@ file_client_args = dict(prefix="awss3", base_uri=data_root)
 #     backend='petrel', path_mapping=dict(data='s3://waymo_data/'))
 
 class_names = ["Car"]
-point_cloud_range = [-75, -75, -2, 75, 75, 4]
+# point_cloud_range = [-75, -75, -2, 75, 75, 4]
+point_cloud_range = [0, -40, -2, 75, 40, 4]
 input_modality = dict(use_lidar=True, use_camera=False)
 db_sampler = dict(
     data_root=data_root,
@@ -67,7 +68,7 @@ eval_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=8,
+    samples_per_gpu=4,
     workers_per_gpu=4,
     persistent_workers=True,
     train=dict(
