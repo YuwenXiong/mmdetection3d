@@ -433,7 +433,12 @@ class S3Backend(BaseStorageBackend):
         # print(self.bucket, filepath[self.bucket_len:])
         s3_client = boto3.client("s3")
 
-        value_buf = s3_reader(s3_client, self.bucket, filepath[self.bucket_len :])
+        for i in range(10):
+            try:
+                value_buf = s3_reader(s3_client, self.bucket, filepath[self.bucket_len :])
+                break
+            except:
+                pass
 
         return value_buf
 
