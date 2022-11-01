@@ -12,6 +12,7 @@ from mmdet3d.core.bbox import Box3DMode, Coord3DMode, LiDARInstance3DBoxes
 from mmdet3d.datasets.custom_3d import Custom3DDataset
 from mmdet3d.datasets.pipelines import Compose
 import torch
+import os
 
 
 def transform(pts: torch.Tensor, tr: torch.Tensor) -> torch.Tensor:
@@ -193,6 +194,7 @@ class PandasetDataset(Custom3DDataset):
         eval_version="detection_cvpr_2019",
         use_valid_flag=False,
         bev_size=(200, 200),
+        **kwargs
     ):
         self.load_interval = load_interval
         self.use_valid_flag = use_valid_flag
@@ -205,6 +207,7 @@ class PandasetDataset(Custom3DDataset):
             box_type_3d=box_type_3d,
             filter_empty_gt=filter_empty_gt,
             test_mode=test_mode,
+            **kwargs
         )
 
         # self.eval_version = eval_version
@@ -257,7 +260,7 @@ class PandasetDataset(Custom3DDataset):
         # standard protocal modified from SECOND.Pytorch
 
         input_dict = dict(
-            pts_filename=info["lidar_path"],
+            pts_filename=os.path.join(self.data_root, info["lidar_path"]),
             # timestamp=info["timestamp"],
             sdv_pose=info["sdv_pose"],
         )

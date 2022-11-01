@@ -6,7 +6,7 @@ from mmdet3d.core.points import BasePoints, get_points_type
 from mmdet.datasets.pipelines import LoadAnnotations, LoadImageFromFile
 from ..builder import PIPELINES
 import pickle as pkl
-
+from io import BytesIO
 
 @PIPELINES.register_module()
 class LoadMultiViewImageFromFiles(object):
@@ -389,6 +389,7 @@ class LoadPointsFromFile(object):
         self.load_dim = load_dim
         self.use_dim = use_dim
         self.file_client_args = file_client_args.copy()
+        # self.file_client_args['base_uri'] = 's3://waabi-sim-assets/waymo_pnpmix_beam512_1023/'
         self.file_client = None
 
     def _load_points(self, pts_filename):
@@ -403,17 +404,18 @@ class LoadPointsFromFile(object):
         if self.file_client is None:
             self.file_client = mmcv.FileClient(**self.file_client_args)
 
-        if pts_filename.endswith('.pkl'):
-            points = pkl.load(open(pts_filename, 'rb'))
-            points = points['xyz'][points['sensor_id'] == 0]
-            return points
-        elif pts_filename.endswith('.npy'):
-            points = np.load(pts_filename, allow_pickle=True).item()
-            points = points['xyz']
-            return points
         try:
             pts_bytes = self.file_client.get(pts_filename)
-            points = np.frombuffer(pts_bytes, dtype=np.float32)
+            if pts_filename.endswith('.pkl'):
+                points = pkl.load(BytesIO(pts_bytes.tobytes()))
+                points = points['xyz'][points['sensor_id'] == 0]
+                return points
+            elif pts_filename.endswith('.npy'):
+                points = np.load(BytesIO(pts_bytes.tobytes()), allow_pickle=True).item()
+                points = points['xyz']
+                return points
+            else:
+                points = np.frombuffer(pts_bytes, dtype=np.float32)
         except ConnectionError:
             mmcv.check_file_exist(pts_filename)
             if pts_filename.endswith('.npy'):
@@ -435,7 +437,18 @@ class LoadPointsFromFile(object):
 
                 - points (:obj:`BasePoints`): Point clouds data.
         """
+
+        # import ipdb; ipdb.set_trace()
+
         pts_filename = results['pts_filename']
+        # sequence_id = int(results['pts_filename'][-10:-7])
+        # frame_id = int(results['pts_filename'][-7:-4])
+        # if int(results['pts_filename'][-11]) == 1:
+        #     sequence_id += 798
+
+        # new_pts_filename = f's3://waabi-sim-assets/waymo_pnpmix_beam512_1023/{sequence_id:04d}/lidar/{frame_id:03d}.npy'
+        # points = self._load_points(new_pts_filename)
+
         points = self._load_points(pts_filename)
         points = points.reshape(-1, self.load_dim)
         points = points[:, self.use_dim]
