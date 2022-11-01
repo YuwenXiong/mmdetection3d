@@ -406,8 +406,9 @@ class S3Backend(BaseStorageBackend):
         self._client = RelativeFileSystem.from_base_uri(base_uri)
         self.base_uri_len = len(base_uri)
         fs, basepath = FileSystem.from_uri(base_uri)
-        self.basepath = Path(basepath)
-        self.bucket = str(self.basepath.parents[1])
+        # self.basepath = Path(basepath)
+        # self.bucket = str(self.basepath.parents[1])
+        self.bucket = base_uri.split('//')[1].split('/')[0]
         self.bucket_len = len(f"s3://{self.bucket}/")
 
     def get(self, filepath: Union[str, Path], mode="rb") -> memoryview:
