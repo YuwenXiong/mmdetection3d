@@ -5,8 +5,13 @@ export CPATH=/root/miniconda3/include:$CPATH
 export CUDA_PATH=/root/miniconda3/include:$CUDA_PATH
 conda init
 
-cd $(dirname $0)/..
+cd $(dirname $0)/../..
 
+git clone https://github.com/scaleapi/pandaset-devkit.git
+cd pandaset-devkit/python
+pip install .
+
+cd $(dirname $0)/../..
 git pull
 
 CONFIG=$1
