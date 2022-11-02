@@ -4,7 +4,7 @@ import math
 import time
 from os import sync
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union, cast
 
 import kornia
 import kornia.augmentation
@@ -18,6 +18,7 @@ from pykeops.torch import LazyTensor
 from scipy.cluster.vq import kmeans2
 from sklearn.cluster import kmeans_plusplus
 from torchvision.ops import sigmoid_focal_loss
+import torch.distributed
 
 # from waabi.autonomy.pnp.domain_adaptation.mae import get_2d_sincos_pos_embed
 # from waabi.autonomy.pnp.openset.detr.deformable_transformer import inverse_sigmoid
@@ -246,6 +247,46 @@ def gumbel_sigmoid(logits, tau=1, hard=False):
         y = y_soft
     return y
 
+def get_process_group(backend: str) -> torch.distributed.ProcessGroup:
+    """Get group process for a specific backend"""
+    group = None
+    for k, v in torch.distributed.distributed_c10d._pg_map.items():  # pylint: disable=protected-access
+        if v[0] == backend:
+            group = k
+            break
+    if not group:
+        group = torch.distributed.new_group(backend=backend)
+    return group
+
+def allgather(tensor: torch.Tensor, device: Optional[torch.device] = torch.device("cpu")) -> torch.Tensor:
+    if not torch.distributed.is_initialized():
+        return tensor
+
+    """All Gather operation, input tensor is not modified"""
+    if device is not None:
+        tensor = tensor.to(device=device)
+    if tensor.is_cuda:
+        pg = get_process_group(torch.distributed.Backend.NCCL)
+    else:
+        pg = get_process_group(torch.distributed.Backend.GLOO)
+
+    dim_pg = get_process_group(torch.distributed.Backend.GLOO)
+    output_list = [torch.empty((1,), dtype=torch.long) for _ in range(torch.distributed.get_world_size())]
+    torch.distributed.all_gather(output_list, torch.as_tensor([tensor.shape[0]]), group=dim_pg)
+
+    output_list = [
+        torch.empty(
+            [cast(int, output_list[_].item())] + list(tensor.shape[1:]),
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+        for _ in range(torch.distributed.get_world_size())
+    ]
+    torch.distributed.all_gather_object(output_list, tensor, group=pg)
+    # @yuwen: all_gather_object won't change the tensor's device thus we need to manually move it to the correct device
+    # this is not verified in multi-node scenario, if anyone finds any issues we can change it to be all-cpu allgather
+    return torch.cat([_.to(tensor.device) for _ in output_list], dim=0)
+
 
 class VectorQuantizer(nn.Module):
     """
@@ -290,7 +331,9 @@ class VectorQuantizer(nn.Module):
 
         self.register_buffer("code_age", torch.zeros(self.n_e) * 10000)
         self.register_buffer("code_usage", torch.zeros(self.n_e))
-        self.register_buffer("data_initialized", torch.ones(1))
+        self.register_buffer("sparse_code_age", torch.zeros(self.n_e) * 10000)
+        self.register_buffer("sparse_code_usage", torch.zeros(self.n_e))
+        self.register_buffer("data_initialized", torch.zeros(1))
         self.register_buffer("reservoir", torch.zeros(self.n_e * 10, e_dim))
         # self.reservoir = torch.zeros(self.n_e * 10, e_dim)
 
@@ -318,7 +361,7 @@ class VectorQuantizer(nn.Module):
         back = torch.gather(used[None, :][inds.shape[0] * [0], :], 1, inds)
         return back.reshape(ishape)
 
-    def forward(self, z, temp=None, rescale_logits=False, return_logits=False):
+    def forward(self, z, sparse=False, temp=None, rescale_logits=False, return_logits=False):
         assert temp is None or temp == 1.0, "Only for interface compatible with Gumbel"
         assert rescale_logits is False, "Only for interface compatible with Gumbel"
         assert return_logits is False, "Only for interface compatible with Gumbel"
@@ -327,10 +370,8 @@ class VectorQuantizer(nn.Module):
         z_flattened = z.reshape(-1, self.e_dim)
         # distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
         # if self.embedding.weight.requires_grad and use_vq and self.training:
-        #     self.update_reservoir(z_flattened.detach())
-
-        # if use_vq:
-        #     self.update_codebook(z_flattened, force_update=self.data_initialized.item() == 0)
+        #     self.update_reservoir(z.detach())
+        # self.update_codebook(z_flattened, force_update=self.data_initialized.item() == 0)
 
         # import ipdb; ipdb.set_trace()
         # z_flattened = LazyTensor(z_flattened[:, None, :])
@@ -374,14 +415,26 @@ class VectorQuantizer(nn.Module):
         if self.sane_index_shape:
             min_encoding_indices = min_encoding_indices.reshape(z_q.shape[0], z_q.shape[2], z_q.shape[3])
 
-        # code_idx = dist.allgather(min_encoding_indices).to(min_encoding_indices.device)
+        # if not torch.distributed.is_initialized():
+        #     code_idx = min_encoding_indices
+        # else:
+        code_idx = allgather(min_encoding_indices).to(min_encoding_indices.device)
 
-        # self.code_age += 1
-        # self.code_age[code_idx] = 0
-        # self.code_usage.index_add_(0, code_idx, torch.ones_like(code_idx).float())
+        if sparse:
+            self.sparse_code_age += 1
+            self.sparse_code_age[code_idx] = 0
+            self.sparse_code_usage.index_add_(
+                0, code_idx, torch.ones_like(code_idx, dtype=self.sparse_code_usage.dtype)
+            )
+            code_util = (self.sparse_code_age < self.dead_limit // 2).sum() / self.sparse_code_age.numel()
+            code_age = self.sparse_code_age.mean()
+        else:
+            self.code_age += 1
+            self.code_age[code_idx] = 0
+            self.code_usage.index_add_(0, code_idx, torch.ones_like(code_idx, dtype=self.code_usage.dtype))
 
-        code_util = (self.code_age < self.dead_limit // 2).sum() / self.code_age.numel()
-        code_age = self.code_age.mean()
+            code_util = (self.code_age < self.dead_limit // 2).sum() / self.code_age.numel()
+            code_age = self.code_age.mean()
 
         # self.update_codebook()
 
@@ -404,9 +457,13 @@ class VectorQuantizer(nn.Module):
 
         return z_q
 
-    def update_reservoir(self, z_flattened, sample=True):
+    def update_reservoir(self, z):
+        if not (self.embedding.weight.requires_grad and use_vq and self.training):
+            return
 
-        if sample:
+        z_flattened = z.flatten(0, -2)
+
+        if self.data_initialized.item() == 1:
             rp = torch.randperm(z_flattened.size(0))
             num_sample = self.reservoir.shape[0] // 100
             # self.reservoir = torch.cat([self.reservoir[num_sample:].cpu(), z_flattened[rp[:num_sample]].data.cpu()])
@@ -414,126 +471,76 @@ class VectorQuantizer(nn.Module):
         else:
             self.reservoir = torch.cat([self.reservoir[z_flattened.shape[0] :], z_flattened.data])
 
-    # def update_code(self, z, min_encoding_indices):
+    def update_code(self, z, min_encoding_indices):
 
-    #     dead_code_mask = self.code_age > self.dead_limit
+        dead_code_mask = self.code_age > self.dead_limit
 
-    #     if self.training and dead_code_mask.sum() > 10:
+        if self.training and dead_code_mask.sum() > 10:
 
-    #         all_z = dist.allgather(z).to(z.device)
-    #         all_z_q = dist.allgather(self.embedding(min_encoding_indices)).to(z.device)
+            all_z = dist.allgather(z).to(z.device)
+            all_z_q = dist.allgather(self.embedding(min_encoding_indices)).to(z.device)
 
-    #         if dist.rank() == 0:
-    #             z_dist = (all_z - all_z_q).norm(dim=-1)
-    #             idx = torch.topk(z_dist, dead_code_mask.sum().long())[1]
-    #             self.embedding.weight.data[dead_code_mask] = all_z[idx].data
-    #             self.code_age[dead_code_mask] = 0
+            if dist.rank() == 0:
+                z_dist = (all_z - all_z_q).norm(dim=-1)
+                idx = torch.topk(z_dist, dead_code_mask.sum().long())[1]
+                self.embedding.weight.data[dead_code_mask] = all_z[idx].data
+                self.code_age[dead_code_mask] = 0
 
-    #         dist.broadcast(self.embedding.weight, src=0)
-    #         dist.broadcast(self.code_age, src=0)
+            dist.broadcast(self.embedding.weight, src=0)
+            dist.broadcast(self.code_age, src=0)
 
-    #         topk_nn = generic_argkmin("SqDist(X,Y)", "a = Vi(1)", "X = Vi(512)", "Y = Vj(512)")
-    #         min_encoding_indices = topk_nn(z, self.embedding.weight).squeeze()
+            topk_nn = generic_argkmin("SqDist(X,Y)", "a = Vi(1)", "X = Vi(512)", "Y = Vj(512)")
+            min_encoding_indices = topk_nn(z, self.embedding.weight).squeeze()
 
-    #         return min_encoding_indices
+            return min_encoding_indices
 
-    #     else:
-    #         return min_encoding_indices
+        else:
+            return min_encoding_indices
 
-    # def update_codebook(self, z_flattened, force_update=False):
+    def update_codebook(self, force_update=False):
+        if not (self.embedding.weight.requires_grad and use_vq and self.training):
+            return
 
-    #     # dead_code_num = (self.code_age >= self.dead_limit).sum()
-    #     dead_code_num = torch.tensor(self.embedding.weight.shape[0])
-    #     if (self.training and (self.code_age >= self.dead_limit).sum() > self.n_e * 0.5) or force_update:
-    #         if dead_code_num > 0:
-    #             live_code = self.embedding.weight[self.code_age < self.dead_limit].data.cpu()
-    #             # live_code = (live_code / live_code.norm(dim=-1, keepdim=True)).data # .cpu()
-    #             # all_z = torch.cat([self.reservoir, self.embedding.weight[self.code_age < self.dead_limit].data.cpu()])
-    #             all_z = torch.cat([self.reservoir.cpu(), live_code])
-    #             if dist.rank() == 0:
-    #                 print("running kmeans!!", dead_code_num.item())  # data driven initialization for the embeddings
-    #                 best_dist = 1e10
-    #                 best_kd = None
-    #                 for i in range(1):
-    #                     rp = torch.randperm(all_z.size(0))
-    #                     init = torch.cat(
-    #                         [live_code, all_z[rp][: (dead_code_num - (self.code_age < self.dead_limit).sum())]]
-    #                     )
-    #                     c, kd = KMeans_cosine(all_z[rp].cuda(), init.data.cuda(), 50, verbose=False)
-    #                     kd = kmeans2(
-    #                         all_z[rp].data.cpu().numpy(),
-    #                         init.data.cpu().numpy(),
-    #                         minit="matrix",
-    #                         # dead_code_num.item(),
-    #                         # minit="points",
-    #                         iter=50,
-    #                     )
-    #                     z_dist = (all_z[rp] - torch.from_numpy(kd[0][kd[1]]).to(all_z.device)).norm(dim=1).sum().item()
-    #                     # z_dist = (all_z[rp] - kd[c]).norm(dim=1).sum().item()
-    #                     # if torch.unique(kd[1]).size == dead_code_num.item():
-    #                     #     best_kd = kd
-    #                     #     best_dist = z_dist
-    #                     #     break
-    #                     # else:
-    #                     #     if z_dist < best_dist:
-    #                     #         best_dist = z_dist
-    #                     #         best_kd = kd
-    #                     #     print("empty cluster", z_dist)
-    #                     #     continue
-    #                 # kd = best_kd
-    #                 # z_dist = best_dist
+        # dead_code_num = (self.code_age >= self.dead_limit).sum()
+        dead_code_num = torch.tensor(self.embedding.weight.shape[0])
+        if (
+            self.training
+            and (
+                (self.code_age >= self.dead_limit).sum() > self.n_e * 0.5
+                or (self.sparse_code_age >= self.dead_limit).sum() > self.n_e * 0.5
+            )
+        ) or force_update:
+            if dead_code_num > 0:
+                live_code = self.embedding.weight[self.code_age < self.dead_limit].data.cpu()
+                # live_code = (live_code / live_code.norm(dim=-1, keepdim=True)).data # .cpu()
+                # all_z = torch.cat([self.reservoir, self.embedding.weight[self.code_age < self.dead_limit].data.cpu()])
+                all_z = torch.cat([self.reservoir.cpu(), live_code])
+                if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                    print("running kmeans!!", dead_code_num.item())  # data driven initialization for the embeddings
+                    rp = torch.randperm(all_z.size(0))
+                    init = torch.cat(
+                        [live_code, all_z[rp][: (dead_code_num - (self.code_age < self.dead_limit).sum())]]
+                    )
+                    kd = kmeans2(
+                        all_z[rp].data.cpu().numpy(),
+                        init.data.cpu().numpy(),
+                        minit="matrix",
+                        iter=50,
+                    )
+                    z_dist = (all_z[rp] - torch.from_numpy(kd[0][kd[1]]).to(all_z.device)).norm(dim=1).sum().item()
+                    self.embedding.weight.data = torch.from_numpy(kd[0]).to(self.embedding.weight.device)
 
-    #                 # self.embedding.weight.data = kd # torch.from_numpy(kd[0]).to(self.embedding.weight.device)
-    #                 self.embedding.weight.data = torch.from_numpy(kd[0]).to(self.embedding.weight.device)
+                    print("finish kmeans", z_dist)
 
-    #                 print("finish kmeans", z_dist)
+            if force_update:
+                self.data_initialized.fill_(1)
 
-    #         if force_update:
-    #             self.data_initialized.fill_(1)
-
-    #         dist.broadcast(self.embedding.weight, src=0)
-    #         # self.code_age[self.code_age >= self.dead_limit] = 0
-    #         self.code_age.fill_(0)
-
-    # def update_codebook(self, z_flattened, force_update=False):
-
-    #     dead_code_num = (self.code_age >= self.dead_limit).sum()
-    #     if (self.training and dead_code_num > self.n_e * 0.3) or force_update:
-    #         print("running kmeans!!", dead_code_num.item())  # data driven initialization for the embeddings
-    #         if dead_code_num > 0:
-    #             all_z = dist.allgather(z_flattened)
-    #             if dist.rank() == 0:
-    #                 all_z = torch.cat([all_z, self.embedding.weight[self.code_age < self.dead_limit].to(all_z.device)])
-    #                 rp = torch.randperm(all_z.size(0))
-    #                 kd = kmeans2(all_z[rp[:20000]].data.cpu().numpy(), dead_code_num.item(), minit="points")
-    #                 self.embedding.weight.data[self.code_age >= self.dead_limit] = torch.from_numpy(kd[0]).to(
-    #                     self.embedding.weight.device
-    #                 )
-    #                 # print()
-    #                 # live_code = self.embedding.weight[self.code_age < self.dead_limit]
-
-    #                 # new_code = live_code[torch.multinomial(self.code_usage[self.code_age < self.dead_limit], dead_code_num, replacement=True)]
-    #                 # new_code = new_code + new_code.uniform_(-0.001, 0.001) * new_code
-    #                 # self.embedding.weight.data[self.code_age >= self.dead_limit] = new_code
-
-    #                 # # mean, std = live_code.mean(dim=0), live_code.std(dim=0)
-    #                 # # a = live_code.min(dim=0)[0]
-    #                 # # b = live_code.max(dim=0)[0]
-    #                 # # self.embedding.weight.data[self.code_age >= self.dead_limit] = (
-    #                 # #     self.embedding.weight.data[self.code_age >= self.dead_limit].uniform_(0, 1) * (b - a) + a
-    #                 # # )
-    #                 # # self.embedding.weight.data[self.code_age >= self.dead_limit] = self.embedding.weight.data[
-    #                 # #     self.code_age >= self.dead_limit
-    #                 # # ].mul_(std)
-    #                 # # self.embedding.weight.data[self.code_age >= self.dead_limit] = self.embedding.weight.data[
-    #                 # #     self.code_age >= self.dead_limit
-    #                 # # ].add_(mean)
-
-    #         if force_update:
-    #             self.data_initialized.fill_(1)
-
-    #         dist.broadcast(self.embedding.weight, src=0)
-    #         self.code_age[self.code_age >= self.dead_limit] = 0
+            if torch.distributed.is_initialized():
+                torch.distributed.broadcast(self.embedding.weight, src=0)
+            self.code_age.fill_(0)
+            self.sparse_code_age.fill_(0)
+            self.code_usage.fill_(0)
+            self.sparse_code_usage.fill_(0)
 
 
 # class LPIPS(nn.Module):
@@ -988,16 +995,17 @@ class VQViT(nn.Module):
         self.blocks = [
             BasicLayer(
                 embed_dim,
-                None,
+                # None,
                 (img_size[0] // (patch_size // 2), img_size[1] // (patch_size // 2)),
                 depth,
                 num_heads=num_heads,
                 window_size=8,
                 downsample=PatchMerging,
+                # use_checkpoint=True,
             ),
             BasicLayer(
                 embed_dim * 2,
-                None,
+                # None,
                 (img_size[0] // patch_size, img_size[1] // patch_size),
                 depth,
                 num_heads=num_heads * 2,
@@ -1038,7 +1046,7 @@ class VQViT(nn.Module):
         # )
         self.decoder_blocks = BasicLayer(
             decoder_embed_dim,
-            None,
+            # None,
             (img_size[0] // patch_size, img_size[1] // patch_size),
             depth=decoder_depth,
             num_heads=decoder_num_heads,
@@ -1048,7 +1056,7 @@ class VQViT(nn.Module):
         # self.decoder_pre_norm = norm_layer(decoder_embed_dim)
 
         self.decoder_norm = norm_layer(decoder_embed_dim)
-        self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size ** 2 * in_chans, bias=True)  # decoder to patch
+        self.decoder_pred = nn.Linear(decoder_embed_dim, patch_size**2 * in_chans, bias=True)  # decoder to patch
         # --------------------------------------------------------------------------
         # self.quantize_b = VectorQuantizer(
         #     n_embed, embed_dim, beta=0.25, remap=remap, sane_index_shape=sane_index_shape, legacy=True
@@ -1229,6 +1237,29 @@ class VQViT(nn.Module):
 
         return x
 
+    def quantize(self, x, sparse=False, global_step=100000000):
+
+        # self.quantize_t.update_reservoir(x)
+        # self.quantize_t.update_codebook(
+        #     force_update=(
+        #         (global_step % 10000 == 0 or self.quantize_t.data_initialized.item() == 0)
+        #         and (
+        #             ((self.quantize_t.code_age >= self.quantize_t.dead_limit).sum() / self.quantize_t.n_e) > 0.05
+        #             or ((self.quantize_t.sparse_code_age >= self.quantize_t.dead_limit).sum() / self.quantize_t.n_e)
+        #             > 0.05
+        #         )
+        #     )
+        # )
+
+        quant, emb_loss, info = self.quantize_t(x, sparse=sparse)
+        if use_vq and (global_step <= 2000):
+            coeff = global_step / 2000
+            quant = x * (1 - coeff) + quant * coeff
+            emb_loss = emb_loss[1] + emb_loss[0] * coeff
+        else:
+            emb_loss = emb_loss[1] + emb_loss[0]
+
+        return quant, emb_loss * 10, info
 
     def decode(self, x):
 
@@ -1260,29 +1291,10 @@ class VQViT(nn.Module):
 
         return x
 
-    def encode_sparse(self, x):
-        pre_h = self.sparse_encoder(x)
-        h = self.sparse_quant_conv(pre_h)
-        quant, emb_loss, info = self.quantize(h)
-        return quant, emb_loss, info, h, pre_h
-
-    # def decode(self, quant_t, give_pre_end=False):
-    #     # quant_t = self.post_quant_conv_t(quant_t)
-    #     dec = self.decoder(quant_t)
-    #     # quant_b = self.post_quant_conv_b(quant_b)
-    #     # quant_t = self.upsample_t(quant_t)
-    #     # quant = torch.cat([quant_t, quant_b], dim=1)
-    #     # dec = self.decoder(quant, give_pre_end)
-    #     return dec # , self.decoder_proj(quant)
-
-    def decode_code(self, code_b, shape=None):
-        quant_b = self.quantize.get_codebook_entry(code_b, shape)
-        dec = self.decode(quant_b)
-        return dec
-
     def forward(self, input):
         quant_t, diff, _ = self.quantize(self.sparse_encode(input))
         # quant_t = self.sparse_encode(input)
+        # quant_t = self.encode(input)
         # diff = None
         dec = self.decode(quant_t)
         rec = self.unpatchify(dec)
@@ -1324,74 +1336,63 @@ class VQViT(nn.Module):
 
         return imgs
 
-    # @torch.jit.unused
-    # def train_iter(
-    #     self, batched_frames: BatchedPnPInput, global_step: int, optimizer_idx
-    # ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    #     self.train()
+    def train_iter(self, batched_lidar, voxelizer):
 
-    #     model_input = PnPModelInput.from_batched_frames(batched_frames, None, False)
+        for p in batched_lidar:
+            p.append(p[0][p[0][:, -1] == 0])
 
-    #     if train_sparse:
-    #         batched_lidar = update_lidar(model_input.batched_lidar)
-    #         if subsample:
-    #             batched_lidar, num_beam = subsample_lidar(
-    #                 batched_lidar, global_step=global_step if curriculum else 10000000
-    #             )
-    #         for p in batched_lidar:
-    #             p[0][:, 2] += 0.4
-    #             p[1][:, 2] += 0.4
-    #         bev = self.voxelizer(batched_lidar)
-    #     else:
-    #         batched_lidar = update_lidar(model_input.batched_lidar)
-    #         for p in batched_lidar:
-    #             p[0][:, 2] += 0.4
-    #             p[1][:, 2] += 0.4
-    #         bev = self.voxelizer(batched_lidar)
+        bev = voxelizer(batched_lidar)
 
-    #     x = self.aug(bev.voxel_features)
-    #     # x = bev.voxel_features
-    #     # x_t = self.voxelizer_t(batched_lidar).voxel_features.chunk(2, dim=1)[0]
+        x, sparse_x = bev.chunk(2, dim=1)
 
-    #     x, sparse_x = x.chunk(2, dim=1)
+        enc_x = self.encode(x)
+        enc_sparse_x = self.sparse_encode(sparse_x)
+        quant, qloss, qinfo = self.quantize(enc_x, sparse=False)
+        sparse_quant, sparse_qloss, sparse_qinfo = self.quantize(enc_sparse_x, sparse=True)
 
-    #     quant, qloss, qinfo = self.encode(sparse_x, global_step=global_step)
+        x = torch.cat([x, x])
+        quant = torch.cat([quant, sparse_quant])
+        qloss = (qloss + sparse_qloss) / 2
 
-    #     # import ipdb; ipdb.set_trace()
-    #     # print(quant.shape)
-    #     xrec = self.decode(quant)
-    #     xrec = self.unpatchify(xrec)
+        xrec = self.decode(quant)
+        xrec = self.unpatchify(xrec)
 
-    #     metas = {}
-    #     if qinfo is not None:
-    #         metas.update(
-    #             {
-    #                 "det/0/q_util": qinfo[3].detach().item(),
-    #                 "det/0/q_age": qinfo[4].detach().item(),
-    #             }
-    #         )
+        metas = {}
+        if qinfo is not None:
+            metas.update(
+                {
+                    "q_util": qinfo[3].detach(),
+                    "q_age": qinfo[4].detach(),
+                    "q_uniformity": self.quantize_t.code_usage.topk(10)[0].sum() / self.quantize_t.code_usage.sum(),
+                    "sparse_q_util": sparse_qinfo[3].detach(),
+                    "sparse_q_age": sparse_qinfo[4].detach(),
+                    "sparse_q_uniformity": self.quantize_t.sparse_code_usage.topk(10)[0].sum() / self.quantize_t.sparse_code_usage.sum(),
+                    "lq": qloss,
+                    "sparselq": sparse_qloss,
+                    # 'det/0/feat_loss': feat_loss.detach().item(),
+                }
+            )
 
-    #     # import ipdb; ipdb.set_trace()
+        rec_loss = F.binary_cross_entropy_with_logits(xrec, x, reduction="none") * 10
+        rec_loss = rec_loss.mean()
 
-    #     # smoothed_x = F.conv3d(x.unflatten(1, (1, -1)), self.k3d, None, 1, self.k3d.shape[-1] // 2).flatten(1, 2)
+        return xrec.sigmoid(), rec_loss, qloss, metas
 
-    #     loss, log_dict, optimizer_idx = self.loss(
-    #         qloss,
-    #         x,
-    #         xrec,
-    #         optimizer_idx,
-    #         global_step,
-    #         last_layer=self.get_last_layer(),
-    #         batched_frames=batched_frames,
-    #         bev_range=None,
-    #         # xrec_t=xrec_t,
-    #         # x_t=x_t,
-    #         # smoothed_x=smoothed_x
-    #     )
+    def eval_iter(self, batched_lidar, voxelizer):
 
-    #     metas.update(log_dict)
+        for p in batched_lidar:
+            p.append(p[0][p[0][:, -1] == 0])
 
-    #     return loss, metas, optimizer_idx
+        bev = voxelizer(batched_lidar)
+
+        x, sparse_x = bev.chunk(2, dim=1)
+
+        enc_sparse_x = self.sparse_encode(sparse_x)
+        sparse_quant, sparse_qloss, sparse_qinfo = self.quantize(enc_sparse_x, sparse=True)
+        xrec = self.decode(sparse_quant)
+        xrec = self.unpatchify(xrec)
+
+        return xrec.sigmoid()
 
     # @staticmethod
     # @torch.jit.unused

@@ -12,11 +12,25 @@ from ..builder import DETECTORS
 from .single_stage import SingleStage3DDetector
 from mmdet3d.models.detectors.vqvae import LidarVQGAN
 from mmdet3d.models.detectors.vqvit import LidarVQViT
+import copy
 
 z_offset = 0.0 # waymo train/val
 # z_offset = 0.4
 # z_offset = 1.6
 # z_offset = 1.8
+
+def calculate_adaptive_weight(nll_loss, g_loss, last_layer=None):
+    if last_layer is not None:
+        nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)[0]
+        g_grads = torch.autograd.grad(g_loss, last_layer, retain_graph=True)[0]
+    else:
+        nll_grads = torch.autograd.grad(nll_loss, self.last_layer[0], retain_graph=True)[0]
+        g_grads = torch.autograd.grad(g_loss, self.last_layer[0], retain_graph=True)[0]
+
+    d_weight = torch.norm(nll_grads) / (torch.norm(g_grads) + 1e-4)
+    d_weight = torch.clamp(d_weight, 0.0, 1e4).detach()
+    return d_weight
+
 
 class Voxelizer(torch.nn.Module):
     """Voxelizer for converting Lidar point cloud to image"""
@@ -187,16 +201,23 @@ class VoxelNet(SingleStage3DDetector):
         # self.middle_encoder = builder.build_middle_encoder(middle_encoder)
         self.voxelizer = Voxelizer(x_min=voxel_layer['point_cloud_range'][0], y_min=voxel_layer['point_cloud_range'][1], z_min=-2, x_max=voxel_layer['point_cloud_range'][3], y_max=voxel_layer['point_cloud_range'][4], z_max=4, step=voxel_layer['voxel_size'][0], z_step=0.15)
 
+        # for p in self.parameters():
+        #     p.requires_grad = False
+
         # # self.preprocessor = LidarVQGAN()
         # self.preprocessor = LidarVQViT()
         # print(
         #     self.preprocessor.load_state_dict(
         #         torch.load(
+        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-27_07-27-37_novq_8x_pandaset_front/checkpoint/model_00150e.pth.tar',
         #             '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-23_20-47-24_8x_pandaset_front/checkpoint/model_00140e.pth.tar',
         #             map_location="cpu",
         #         )["model"],
         #         strict=False,
         #     )
+        # )
+        # print(
+        #     self.load_state_dict(torch.load('/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/hv_pointpillars_secfpn_6x8_80e_pandaset-3d-car-binarynewvoxel_height_fix_kitti_anchor_sim512_data_fix2/epoch_40_p_loss.pth', map_location='cpu')['state_dict'], strict=True)
         # )
         # self.preprocessor.eval()
         # for p in self.preprocessor.parameters():
@@ -227,6 +248,30 @@ class VoxelNet(SingleStage3DDetector):
         if self.with_neck:
             x = self.neck(x)
         return x
+
+    def extract_feat_preprocessor(self, points, img_metas=None):
+        """Extract features from points."""
+        for p in points:
+            p[:, 2] += z_offset
+
+
+        if self.training:
+            xrec, rec_loss, qloss, metas = self.preprocessor.train_iter(copy.deepcopy([[_] for _ in points]), self.voxelizer)
+            x = xrec
+        else:
+            xrec = self.preprocessor.eval_iter(copy.deepcopy([[_] for _ in points]), self.voxelizer)
+            x = (self.voxelizer([[_[_[:, -1] == 0]] for _ in points]) + xrec).clamp(0, 1)
+            x[x < 0.1] = 0
+
+        self.backbone.eval()
+        x = self.backbone(x)
+        if self.with_neck:
+            self.neck.eval()
+            x = self.neck(x)
+        if self.training:
+            return x, rec_loss, qloss, metas
+        else:
+            return x
 
     @torch.no_grad()
     @force_fp32()
@@ -269,6 +314,7 @@ class VoxelNet(SingleStage3DDetector):
             dict: Losses of each branch.
         """
         x = self.extract_feat(points, img_metas)
+        # x, rec_loss, qloss, metas = self.extract_feat_preprocessor(points, img_metas)
         outs = self.bbox_head(x)
         for box in gt_bboxes_3d:
             box.tensor[:, 2] += z_offset
@@ -278,14 +324,29 @@ class VoxelNet(SingleStage3DDetector):
         #     gt_bboxes_ignore.append(gt_bboxes_3d[i][gt_labels_3d[i] == -1].tensor)
         #     gt_bboxes_3d[i] = gt_bboxes_3d[i][gt_labels_3d[i] != -1]
         #     gt_labels_3d[i] = gt_labels_3d[i][gt_labels_3d[i] != -1]
+
+        # loss_inputs = outs + (gt_bboxes_3d + gt_bboxes_3d, gt_labels_3d + gt_labels_3d, img_metas + img_metas)
+        # losses = self.bbox_head.loss(
+        #     *loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore + gt_bboxes_ignore)
         loss_inputs = outs + (gt_bboxes_3d, gt_labels_3d, img_metas)
         losses = self.bbox_head.loss(
             *loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore)
+        # import ipdb; ipdb.set_trace()
+        # d_weight = calculate_adaptive_weight(rec_loss, sum([_[0] for _ in losses.values()]), self.preprocessor.decoder_pred.weight)
+        # for k in losses:
+        #     if 'loss' in k:
+        #         losses[k] = sum(losses[k]) * d_weight #  * 0.2
+
+        # losses['d_weight'] = d_weight
+        # losses['rec_loss'] = rec_loss
+        # losses['q_loss'] = qloss
+        # losses.update(metas)
         return losses
 
     def simple_test(self, points, img_metas, imgs=None, rescale=False):
         """Test function without augmentaiton."""
         x = self.extract_feat(points, img_metas)
+        # x = self.extract_feat_preprocessor(points, img_metas)
         outs = self.bbox_head(x)
         bbox_list = self.bbox_head.get_bboxes(
             *outs, img_metas, rescale=rescale)
