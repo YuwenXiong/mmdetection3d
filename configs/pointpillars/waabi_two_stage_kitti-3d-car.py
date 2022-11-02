@@ -100,4 +100,4 @@ data = dict(
 
 find_unused_parameters = True
 
-work_dir = "work_dirs/waabi_two_stage_kitti-3d-car-run4"
+work_dir = "work_dirs/waabi_two_stage_kitti-3d-car-3diouloss"

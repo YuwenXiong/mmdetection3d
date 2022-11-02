@@ -407,11 +407,11 @@ class LoadPointsFromFile(object):
         try:
             pts_bytes = self.file_client.get(pts_filename)
             if pts_filename.endswith('.pkl'):
-                points = pkl.load(BytesIO(pts_bytes.tobytes()))
+                points = pkl.load(BytesIO(pts_bytes))
                 points = points['xyz'][points['sensor_id'] == 0]
                 return points
             elif pts_filename.endswith('.npy'):
-                points = np.load(BytesIO(pts_bytes.tobytes()), allow_pickle=True).item()
+                points = np.load(BytesIO(pts_bytes), allow_pickle=True).item()
                 points = points['xyz']
                 return points
             else:

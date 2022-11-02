@@ -229,6 +229,45 @@ def get_iou_loss(a, b, cross=False, max_cost=21.0):
             return torch.zeros(1, device=a.device, dtype=a.dtype).sum()
 
 
+def get_3diou_loss(a, b, cross=False, max_cost=21.0):
+    if cross:
+        a = a.unsqueeze(1)
+        b = b.unsqueeze(0)
+
+    # xyzwlh
+
+    x_min = torch.max(a[..., 0] - a[..., 3] / 2.0, b[..., 0] - b[..., 3] / 2.0)
+    x_max = torch.min(a[..., 0] + a[..., 3] / 2.0, b[..., 0] + b[..., 3] / 2.0)
+    y_min = torch.max(a[..., 1] - a[..., 4] / 2.0, b[..., 1] - b[..., 4] / 2.0)
+    y_max = torch.min(a[..., 1] + a[..., 4] / 2.0, b[..., 1] + b[..., 4] / 2.0)
+
+    zmax1 = a[..., 2] + 0.5 * a[..., 5]
+    zmin1 = a[..., 2] - 0.5 * a[..., 5]
+    zmax2 = b[..., 2] + 0.5 * b[..., 5]
+    zmin2 = b[..., 2] - 0.5 * b[..., 5]
+
+    ol = x_max - x_min
+    ow = y_max - y_min
+    z_overlap = torch.min(zmax1, zmax2) - torch.max(zmin1, zmin2)
+
+    intersect = ol * ow * z_overlap
+    union = a[..., 3] * a[..., 4] * a[..., 5] + b[..., 3] * b[..., 4] * b[..., 5] - intersect
+
+    mask = (a[..., 3] > 0) & (a[..., 4] > 0) & (a[..., 5] > 0) & (b[..., 3] > 0) & (b[..., 4] > 0) & (b[..., 5] > 0) & (ol > 0) & (ow > 0) & (union > 0) & (z_overlap > 0)
+
+    if cross:
+        cost = max_cost * torch.ones((a.shape[0], b.shape[1]), device=a.device, dtype=a.dtype)
+        cost[mask] = -torch.log(intersect[mask] / union[mask])
+        cost[cost > max_cost] = max_cost
+        return cost
+    else:
+        if mask.any():
+            loss = -torch.log(intersect[mask] / union[mask])
+            return loss.sum()
+        else:
+            return torch.zeros(1, device=a.device, dtype=a.dtype).sum()
+
+
 class DetectionLoss(nn.Module):
     def __init__(self, weights, focal, dontcare_iou=None, pos_iou=None):
         super().__init__()
@@ -310,7 +349,8 @@ class DetectionLoss(nn.Module):
             # if bboxes.shape[-1] == 5:
             #     iou_cost = get_iou_loss(bboxes[:, :4], gt_bboxes[:, [0, 1, 3, 4]], cross=True)
             # else:
-            iou_cost = get_iou_loss(bboxes[:, [0, 1, 3, 4]], gt_bboxes[:, [0, 1, 3, 4]], cross=True)
+            # iou_cost = get_iou_loss(bboxes[:, [0, 1, 3, 4]], gt_bboxes[:, [0, 1, 3, 4]], cross=True)
+            iou_cost = get_3diou_loss(bboxes[:, :6], gt_bboxes[:, :6], cross=True)
 
             bboxes = bboxes.unsqueeze(1).repeat(1, len(gt_bboxes), 1)
             gt_bboxes = gt_bboxes.unsqueeze(0).repeat(len(bboxes), 1, 1)
@@ -412,7 +452,8 @@ class DetectionLoss(nn.Module):
         #     iou_loss = get_iou_loss(bboxes[:, :4], gt_bboxes[:, [0, 1, 3, 4]]) / num_bboxes
         # else:
         box_loss = F.smooth_l1_loss(bboxes[:, :6], gt_bboxes[:, :6], reduction="sum") / num_bboxes
-        iou_loss = get_iou_loss(bboxes[:, [0, 1, 3, 4]], gt_bboxes[:, [0, 1, 3, 4]]) / num_bboxes
+        # iou_loss = get_iou_loss(bboxes[:, [0, 1, 3, 4]], gt_bboxes[:, [0, 1, 3, 4]]) / num_bboxes
+        iou_loss = get_3diou_loss(bboxes[:, :6], gt_bboxes[:, :6]) / num_bboxes
 
         theta = 2.0 * bboxes[:, -1]
         gt_theta = 2.0 * gt_bboxes[:, -1]
@@ -783,7 +824,7 @@ class SpatialAttention(nn.Module):
             mask = torch.empty([tgt_coords[i].size()[0], src_coords[i].size()[0]], dtype=torch.bool)
             if dist_th is not None:
                 dist = tgt_coords[i].view(-1, 1, 2) - src_coords[i].view(1, -1, 2)
-                dist = torch.sqrt((dist ** 2).sum(2))
+                dist = torch.sqrt((dist**2).sum(2))
                 mask = dist < dist_th
             elif masks is not None:
                 mask = masks[i]
@@ -868,7 +909,9 @@ class WaabiTwoStageDetector(Base3DDetector):
         # self.bev_range = (self.voxel_cfg.x_min, self.voxel_cfg.x_max, self.voxel_cfg.y_min, self.voxel_cfg.y_max)
         # [0, -39.68, -3, 69.12, 39.68, 1]
         # self.bev_range = [0, 69.12, -39.68, 39.68]
-        self.bev_range = [0, 80, -40, 40]
+        # self.bev_range = [0, 80, -40, 40]
+        self.bev_range = [0, 72.5, -40, 40]
+        # self.bev_range = [-75, 75, -75, 75]
         # self.bev_range = [-74.24, 74.24, -74.24, 74.24]
         self.roi_size = 3
         self.dist_th = 20.0  # distance threshold used in spatial attention
@@ -890,6 +933,7 @@ class WaabiTwoStageDetector(Base3DDetector):
             self.bev_range[2],
             self.bev_range[3],
             0.15625,
+            # 0.3125,
             -2,
             4,
             0.15,
@@ -945,17 +989,18 @@ class WaabiTwoStageDetector(Base3DDetector):
         # self.post_quant = nn.Sequential(Conv(256, 128))
 
         # self.preprocessor = LidarVQGAN()
-        # self.preprocessor = LidarVQViT()
-        # print(
-        #     self.preprocessor.load_state_dict(
-        #         torch.load(
-        #             '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-23_20-47-24_8x_pandaset_front/checkpoint/model_00140e.pth.tar',
-        #             map_location="cpu",
-        #         )["model"],
-        #         strict=False,
-        #     )
-        # )
-        self.preprocessor = None
+        self.preprocessor = LidarVQViT()
+        print(
+            self.preprocessor.load_state_dict(
+                torch.load(
+                    '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-23_20-47-24_8x_pandaset_front/checkpoint/model_0150e.pth.tar',
+                    # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-23_20-47-24_8x_pandaset_front/checkpoint/model_00140e.pth.tar',
+                    map_location="cpu",
+                )["model"],
+                strict=False,
+            )
+        )
+        # self.preprocessor = None
 
     def forward_dummy(self, points):
         """Used for computing network flops.
@@ -1008,8 +1053,8 @@ class WaabiTwoStageDetector(Base3DDetector):
         # roi_feats = get_roi_feats(fm, rois, self.bev_range if bev_range is None else bev_range, self.roi_align_rotated)
         # roi_coords = get_roi_coords(rois, self.roi_size)
 
-        obj_feats = roi_feats[:, :, int(self.roi_size ** 2 // 2)].clone()
-        obj_coords = roi_coords[:, :, int(self.roi_size ** 2 // 2)].clone()
+        obj_feats = roi_feats[:, :, int(self.roi_size**2 // 2)].clone()
+        obj_coords = roi_coords[:, :, int(self.roi_size**2 // 2)].clone()
         obj_feats += self.pe(obj_coords)  # can be removed
 
         obj_feats = self.roi_attention(obj_feats, obj_coords, roi_feats, roi_coords)
@@ -1116,10 +1161,17 @@ class WaabiTwoStageDetector(Base3DDetector):
         bev = self.voxelizer(points)
         # import ipdb; ipdb.set_trace()
         if self.preprocessor is not None:
-            residual, _ = self.preprocessor.forward(bev)
-            # bev = gumbel_sigmoid(bev * 200 + residual, hard=True)
-            bev = (bev * 200 + residual).sigmoid()
-            bev[bev < 0.1] = 0
+            pad_x = bev.new_zeros((bev.shape[0], bev.shape[1], 512, 512))
+            pad_x[:, :, :bev.shape[2], :bev.shape[3]] = bev
+            residual, _ = self.preprocessor.forward(pad_x)
+            pad_x = (pad_x * 200 + residual).sigmoid()
+            pad_x[pad_x < 0.1] = 0
+            bev = pad_x[:, :, :bev.shape[2], :bev.shape[3]]
+            
+            # residual, _ = self.preprocessor.forward(bev)
+            # # bev = gumbel_sigmoid(bev * 200 + residual, hard=True)
+            # bev = (bev * 200 + residual).sigmoid()
+            # bev[bev < 0.1] = 0
             # bev[bev > 0.9] = 1
             # bev = (gumbel_sigmoid(residual, hard=True)).float()
             # bev = (residual.sigmoid()).float()
@@ -1199,6 +1251,7 @@ class WaabiTwoStageDetector(Base3DDetector):
             # # # bboxes[:, 5] = bbox_out[i][0][:, 3]
             # bboxes[:, 6:7] = bbox_out[i][0][:, 4:5]
             bboxes = bbox_out[i][0][:, :-1]
+            # bboxes[:, [4, 5]] = bboxes[:, [5, 4]]
             bboxes[:, 2] -= z_offset
 
             bboxes = img_metas[i]["box_type_3d"](bboxes, box_dim=7)

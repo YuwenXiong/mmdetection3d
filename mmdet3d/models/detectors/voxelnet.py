@@ -16,6 +16,7 @@ from mmdet3d.models.detectors.vqvit import LidarVQViT
 z_offset = 0.0 # waymo train/val
 # z_offset = 0.4
 # z_offset = 1.6
+# z_offset = 1.8
 
 class Voxelizer(torch.nn.Module):
     """Voxelizer for converting Lidar point cloud to image"""
