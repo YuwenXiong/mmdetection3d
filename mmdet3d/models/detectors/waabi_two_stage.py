@@ -19,8 +19,8 @@ from mmdet3d.core.post_processing import nms_bev
 from mmcv.ops.box_iou_rotated import box_iou_rotated
 from scipy.optimize import linear_sum_assignment
 
-# z_offset = 0.0
-z_offset = 1.6
+z_offset = 0.0
+# z_offset = 1.6
 # z_offset = 0.4
 
 
@@ -253,7 +253,18 @@ def get_3diou_loss(a, b, cross=False, max_cost=21.0):
     intersect = ol * ow * z_overlap
     union = a[..., 3] * a[..., 4] * a[..., 5] + b[..., 3] * b[..., 4] * b[..., 5] - intersect
 
-    mask = (a[..., 3] > 0) & (a[..., 4] > 0) & (a[..., 5] > 0) & (b[..., 3] > 0) & (b[..., 4] > 0) & (b[..., 5] > 0) & (ol > 0) & (ow > 0) & (union > 0) & (z_overlap > 0)
+    mask = (
+        (a[..., 3] > 0)
+        & (a[..., 4] > 0)
+        & (a[..., 5] > 0)
+        & (b[..., 3] > 0)
+        & (b[..., 4] > 0)
+        & (b[..., 5] > 0)
+        & (ol > 0)
+        & (ow > 0)
+        & (union > 0)
+        & (z_overlap > 0)
+    )
 
     if cross:
         cost = max_cost * torch.ones((a.shape[0], b.shape[1]), device=a.device, dtype=a.dtype)
@@ -592,8 +603,8 @@ def gt_from_label(gt_bboxes, gt_labels, bev_range, classes, track=False, labels_
             y_max = y_max_all[i]
         for j, c in enumerate(classes):
 
-            label = gt_labels[i] == c
-            x, y, z, l, w, h, theta = gt_bboxes[i][label].tensor.chunk(7, dim=1)
+            # label = gt_labels[i] == c
+            x, y, z, l, w, h, theta = gt_bboxes[i].tensor.chunk(7, dim=1)
             z += z_offset
             # x, y = label.trajectories[:, 0, 0], label.trajectories[:, 0, 1]
             # l, w = label.boxes[:, 0], label.boxes[:, 1]
@@ -605,7 +616,7 @@ def gt_from_label(gt_bboxes, gt_labels, bev_range, classes, track=False, labels_
             # cls_idcs = c.value * torch.ones(len(bboxes), device=bboxes.device, dtype=torch.int64)
             # ignore = label.ignores[mask]
             ignore = torch.zeros(len(bboxes), device=device, dtype=torch.bool)
-            # ignore[torch.where((bboxes[:, 0].abs() < 2) & (bboxes[:, 1].abs() < 2))] = True
+            ignore[gt_labels[i] == -1] = True
 
             gt["bboxes"][i].append(bboxes)
             gt["cls_idcs"][i].append(cls_idcs)
@@ -909,9 +920,9 @@ class WaabiTwoStageDetector(Base3DDetector):
         # self.bev_range = (self.voxel_cfg.x_min, self.voxel_cfg.x_max, self.voxel_cfg.y_min, self.voxel_cfg.y_max)
         # [0, -39.68, -3, 69.12, 39.68, 1]
         # self.bev_range = [0, 69.12, -39.68, 39.68]
-        # self.bev_range = [0, 80, -40, 40]
-        self.bev_range = [0, 72.5, -40, 40]
-        # self.bev_range = [-75, 75, -75, 75]
+        # self.bev_range = [0, 72.5, -40, 40] # for kitti
+        # self.bev_range = [0, 80.0, -40, 40]  # for pandaset
+        self.bev_range = [-75, 75, -75, 75]
         # self.bev_range = [-74.24, 74.24, -74.24, 74.24]
         self.roi_size = 3
         self.dist_th = 20.0  # distance threshold used in spatial attention
@@ -929,11 +940,12 @@ class WaabiTwoStageDetector(Base3DDetector):
         self.voxelizer = Voxelizer(
             # self.bev_range[0], self.bev_range[1], self.bev_range[2], self.bev_range[3], 0.32, -2, 4, 0.15
             self.bev_range[0],
+            # 80,
             self.bev_range[1],
             self.bev_range[2],
             self.bev_range[3],
-            0.15625,
-            # 0.3125,
+            # 0.15625,
+            0.15625 * 2,
             -2,
             4,
             0.15,
@@ -989,18 +1001,19 @@ class WaabiTwoStageDetector(Base3DDetector):
         # self.post_quant = nn.Sequential(Conv(256, 128))
 
         # self.preprocessor = LidarVQGAN()
-        self.preprocessor = LidarVQViT()
-        print(
-            self.preprocessor.load_state_dict(
-                torch.load(
-                    '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-23_20-47-24_8x_pandaset_front/checkpoint/model_0150e.pth.tar',
-                    # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-23_20-47-24_8x_pandaset_front/checkpoint/model_00140e.pth.tar',
-                    map_location="cpu",
-                )["model"],
-                strict=False,
-            )
-        )
-        # self.preprocessor = None
+        # self.preprocessor = LidarVQViT()
+        # print(
+        #     self.preprocessor.load_state_dict(
+        #         torch.load(
+        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-27_07-27-37_novq_8x_pandaset_front/checkpoint/model_00150e.pth.tar',
+        #             '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-23_20-47-24_8x_pandaset_front/checkpoint/model_00140e.pth.tar',
+        #             # "/opt/experiments/vqvit_front_2022-10-30_20-05-48/checkpoint/model_0190e.pth.tar",
+        #             map_location="cpu",
+        #         )["model"],
+        #         strict=False,
+        #     )
+        # )
+        self.preprocessor = None
 
     def forward_dummy(self, points):
         """Used for computing network flops.
@@ -1160,14 +1173,15 @@ class WaabiTwoStageDetector(Base3DDetector):
             p[0][:, 2] += z_offset
         bev = self.voxelizer(points)
         # import ipdb; ipdb.set_trace()
+        # import ipdb; ipdb.set_trace()
         if self.preprocessor is not None:
             pad_x = bev.new_zeros((bev.shape[0], bev.shape[1], 512, 512))
-            pad_x[:, :, :bev.shape[2], :bev.shape[3]] = bev
+            pad_x[:, :, : bev.shape[2], : bev.shape[3]] = bev
             residual, _ = self.preprocessor.forward(pad_x)
             pad_x = (pad_x * 200 + residual).sigmoid()
             pad_x[pad_x < 0.1] = 0
-            bev = pad_x[:, :, :bev.shape[2], :bev.shape[3]]
-            
+            bev = pad_x[:, :, : bev.shape[2], : bev.shape[3]]
+
             # residual, _ = self.preprocessor.forward(bev)
             # # bev = gumbel_sigmoid(bev * 200 + residual, hard=True)
             # bev = (bev * 200 + residual).sigmoid()
@@ -1176,6 +1190,7 @@ class WaabiTwoStageDetector(Base3DDetector):
             # bev = (gumbel_sigmoid(residual, hard=True)).float()
             # bev = (residual.sigmoid()).float()
             # import ipdb; ipdb.set_trace()
+        # feat = self.backbone(bev[:, :, :, :464])
         feat = self.backbone(bev)
         # import ipdb; ipdb.set_trace()
         fm = feat[0]
