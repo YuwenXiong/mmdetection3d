@@ -3,7 +3,7 @@
 # Usually voxel size is changed consistently with the point cloud range
 # If point cloud range is modified, do remember to change all related
 # keys in the config.
-voxel_size = [0.3125, 0.3125, 6]
+voxel_size = [0.15625, 0.15625, 6]
 model = dict(
     type='VoxelNet',
     voxel_layer=dict(
