@@ -921,7 +921,8 @@ class WaabiTwoStageDetector(Base3DDetector):
         # [0, -39.68, -3, 69.12, 39.68, 1]
         # self.bev_range = [0, 69.12, -39.68, 39.68]
         # self.bev_range = [0, 72.5, -40, 40] # for kitti
-        self.bev_range = [0, 80.0, -40, 40]  # for pandaset
+        # self.bev_range = [0, 80.0, -40, 40]  # for pandaset
+        self.bev_range = [0, 75.0, -40, 40]  # for waymo front
         # self.bev_range = [-75, 75, -75, 75]
         # self.bev_range = [-74.24, 74.24, -74.24, 74.24]
         self.roi_size = 3

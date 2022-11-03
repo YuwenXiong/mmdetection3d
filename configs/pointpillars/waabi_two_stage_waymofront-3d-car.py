@@ -3,7 +3,7 @@
 _base_ = [
     "../_base_/models/waabi_two_stage_kitti.py",
     # "../_base_/datasets/kitti-3d-3class.py",
-    "../_base_/datasets/waymoD2-3d-car.py",
+    "../_base_/datasets/waymoD2_front-3d-car.py",
     "../_base_/schedules/schedule_2x.py",
     "../_base_/default_runtime.py",
 ]
