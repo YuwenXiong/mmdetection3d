@@ -13,7 +13,8 @@ file_client_args = dict(prefix='awss3', base_uri=data_root)
 #     backend='petrel', path_mapping=dict(data='s3://waymo_data/'))
 
 class_names = ['Car']
-point_cloud_range = [-74.88, -74.88, -2, 74.88, 74.88, 4]
+# point_cloud_range = [-74.88, -74.88, -2, 74.88, 74.88, 4]
+point_cloud_range = [0, -40, -2, 80, 40, 4]
 input_modality = dict(use_lidar=True, use_camera=False)
 db_sampler = dict(
     data_root=data_root,
@@ -133,7 +134,7 @@ data = dict(
         modality=input_modality,
         classes=class_names,
         test_mode=True,
-        box_type_3d='LiDAR', load_interval=5,
+        box_type_3d='LiDAR',
         file_client_args=file_client_args),
     test=dict(
         type=dataset_type,
@@ -144,7 +145,7 @@ data = dict(
         modality=input_modality,
         classes=class_names,
         test_mode=True,
-        box_type_3d='LiDAR', load_interval=5,
+        box_type_3d='LiDAR',
         file_client_args=file_client_args))
 
 evaluation = dict(interval=24, pipeline=eval_pipeline)
