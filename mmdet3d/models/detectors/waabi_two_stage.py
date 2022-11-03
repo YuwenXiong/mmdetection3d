@@ -603,8 +603,9 @@ def gt_from_label(gt_bboxes, gt_labels, bev_range, classes, track=False, labels_
             y_max = y_max_all[i]
         for j, c in enumerate(classes):
 
-            # label = gt_labels[i] == c
-            x, y, z, l, w, h, theta = gt_bboxes[i].tensor.chunk(7, dim=1)
+            label = gt_labels[i] == c
+            x, y, z, l, w, h, theta = gt_bboxes[i].tensor[label].chunk(7, dim=1)
+            # x, y, z, l, w, h, theta = gt_bboxes[i].tensor.chunk(7, dim=1)
             z += z_offset
             # x, y = label.trajectories[:, 0, 0], label.trajectories[:, 0, 1]
             # l, w = label.boxes[:, 0], label.boxes[:, 1]
@@ -616,7 +617,7 @@ def gt_from_label(gt_bboxes, gt_labels, bev_range, classes, track=False, labels_
             # cls_idcs = c.value * torch.ones(len(bboxes), device=bboxes.device, dtype=torch.int64)
             # ignore = label.ignores[mask]
             ignore = torch.zeros(len(bboxes), device=device, dtype=torch.bool)
-            ignore[gt_labels[i] == -1] = True
+            # ignore[gt_labels[i] == -1] = True
 
             gt["bboxes"][i].append(bboxes)
             gt["cls_idcs"][i].append(cls_idcs)
