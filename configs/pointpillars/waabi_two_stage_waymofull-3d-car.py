@@ -58,7 +58,7 @@ model = dict(
 
 # dataset settings
 
-optimizer = dict(type="AdamW", lr=0.001 / 4, weight_decay=1e-4)
+optimizer = dict(type="AdamW", lr=0.002, weight_decay=1e-4)
 runner = dict(type="EpochBasedRunner", max_epochs=24)
 
 # Use evaluation interval=2 reduce the number of evaluation timese
