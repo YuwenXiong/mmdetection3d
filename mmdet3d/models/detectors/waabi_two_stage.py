@@ -921,8 +921,8 @@ class WaabiTwoStageDetector(Base3DDetector):
         # [0, -39.68, -3, 69.12, 39.68, 1]
         # self.bev_range = [0, 69.12, -39.68, 39.68]
         # self.bev_range = [0, 72.5, -40, 40] # for kitti
-        # self.bev_range = [0, 80.0, -40, 40]  # for pandaset
-        self.bev_range = [-75, 75, -75, 75]
+        self.bev_range = [0, 80.0, -40, 40]  # for pandaset
+        # self.bev_range = [-75, 75, -75, 75]
         # self.bev_range = [-74.24, 74.24, -74.24, 74.24]
         self.roi_size = 3
         self.dist_th = 20.0  # distance threshold used in spatial attention
@@ -944,8 +944,8 @@ class WaabiTwoStageDetector(Base3DDetector):
             self.bev_range[1],
             self.bev_range[2],
             self.bev_range[3],
-            # 0.15625,
-            0.15625 * 2,
+            0.15625,
+            # 0.15625 * 2,
             -2,
             4,
             0.15,
@@ -1005,8 +1005,8 @@ class WaabiTwoStageDetector(Base3DDetector):
         # print(
         #     self.preprocessor.load_state_dict(
         #         torch.load(
-        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-27_07-27-37_novq_8x_pandaset_front/checkpoint/model_00150e.pth.tar',
-        #             '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-23_20-47-24_8x_pandaset_front/checkpoint/model_00140e.pth.tar',
+        #             '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-27_07-27-37_novq_8x_pandaset_front/checkpoint/model_00150e.pth.tar',
+        #             # '/mnt/remote/shared_data/users/yuwen/arch_baselines_oct/vqvit_front_2022-10-23_20-47-24_8x_pandaset_front/checkpoint/model_00140e.pth.tar',
         #             # "/opt/experiments/vqvit_front_2022-10-30_20-05-48/checkpoint/model_0190e.pth.tar",
         #             map_location="cpu",
         #         )["model"],
