@@ -604,7 +604,7 @@ def gt_from_label(gt_bboxes, gt_labels, bev_range, classes, track=False, labels_
         for j, c in enumerate(classes):
 
             label = gt_labels[i] == c
-            x, y, z, l, w, h, theta = gt_bboxes[i].tensor[label].chunk(7, dim=1)
+            x, y, z, l, w, h, theta = gt_bboxes[i].tensor.to(device)[label].chunk(7, dim=1)
             # x, y, z, l, w, h, theta = gt_bboxes[i].tensor.chunk(7, dim=1)
             z += z_offset
             # x, y = label.trajectories[:, 0, 0], label.trajectories[:, 0, 1]
