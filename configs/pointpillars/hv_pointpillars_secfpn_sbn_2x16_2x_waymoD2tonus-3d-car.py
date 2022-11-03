@@ -38,7 +38,7 @@ model = dict(
     ),
 )
 runner = dict(type="EpochBasedRunner", max_epochs=24)
-optimizer = dict(type="AdamW", lr=0.001, weight_decay=0.01)
+optimizer = dict(type="AdamW", lr=0.0005, weight_decay=0.01)
 # work_dir = "work_dirs/test"
 # mp_start_method = "forkserver"
 custom_hooks = [dict(type="SyncAWSHook")]
