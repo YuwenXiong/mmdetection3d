@@ -3,7 +3,7 @@
 _base_ = [
     "../_base_/models/waabi_two_stage_kitti.py",
     # "../_base_/datasets/kitti-3d-3class.py",
-    "../_base_/datasets/waymoD2-3d-car.py",
+    "../_base_/datasets/waymoD2_front-3d-car.py",
     "../_base_/schedules/schedule_2x.py",
     "../_base_/default_runtime.py",
 ]
@@ -58,7 +58,7 @@ model = dict(
 
 # dataset settings
 
-optimizer = dict(type="AdamW", lr=0.001 / 2, weight_decay=1e-4)
+optimizer = dict(type="AdamW", lr=0.002, weight_decay=1e-4)
 runner = dict(type="EpochBasedRunner", max_epochs=24)
 
 # Use evaluation interval=2 reduce the number of evaluation timese

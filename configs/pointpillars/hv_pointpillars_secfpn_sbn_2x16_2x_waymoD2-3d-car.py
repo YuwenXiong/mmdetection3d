@@ -13,7 +13,7 @@ model = dict(
         anchor_generator=dict(
             type="AlignedAnchor3DRangeGenerator",
             # ranges=[[-74.88, -74.88, -0.0345, 74.88, 74.88, -0.0345]],
-            ranges=[[-74.88, -74.88, 0, 74.88, 74.88, 0]],
+            ranges=[[-75, -75, 0, 75, 75, 0]],
             sizes=[[4.7, 2.1, 1.7]],
             # sizes=[[3.9, 1.6, 1.56]],
             rotations=[0, 1.57],
@@ -38,10 +38,10 @@ model = dict(
     ),
 )
 data = dict(
-    samples_per_gpu=3,
+    samples_per_gpu=4,
 )
 runner = dict(type="EpochBasedRunner", max_epochs=24)
-optimizer = dict(type="AdamW", lr=0.000375, weight_decay=0.01)
+optimizer = dict(type="AdamW", lr=0.0005, weight_decay=0.01)
 # work_dir = "work_dirs/test"
 # mp_start_method = "forkserver"
 custom_hooks = [dict(type="SyncAWSHook")]

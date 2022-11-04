@@ -4,6 +4,106 @@ import torch
 from mmdet3d.core import bbox3d2result, merge_aug_bboxes_3d
 from ..builder import DETECTORS
 from .mvx_two_stage import MVXTwoStageDetector
+from typing import List
+
+z_offset = 0.0
+
+class Voxelizer(torch.nn.Module):
+    """Voxelizer for converting Lidar point cloud to image"""
+
+    def __init__(self, x_min, x_max, y_min, y_max, step, z_min, z_max, z_step):
+        super().__init__()
+
+        self.x_min = x_min
+        self.x_max = x_max
+        self.y_min = y_min
+        self.y_max = y_max
+        self.step = step
+        self.z_min = z_min
+        self.z_max = z_max
+        self.z_step = z_step
+
+        self.width = round((self.x_max - self.x_min) / self.step)
+        self.height = round((self.y_max - self.y_min) / self.step)
+        self.z_depth = round((self.z_max - self.z_min) / self.z_step)
+        # self.h_depth = round((self.h_max - self.h_min) / self.h_step)
+        self.depth = self.z_depth
+        # if self.add_intensity:
+        #     self.depth *= 2
+        # if self.add_ground:
+        #     self.depth += self.h_depth
+
+    def voxelize_single(self, lidar, bev):
+        """Voxelize a single lidar sweep into image frame
+        Image frame:
+        1. Increasing depth indices corresponds to increasing real world z
+            values.
+        2. Increasing height indices corresponds to decreasing real world y
+            values.
+        3. Increasing width indices corresponds to increasing real world x
+            values.
+        Args:
+            lidar (torch.Tensor N x 4 or N x 5) x, y, z, intensity, height_to_ground (optional)
+            bev (torch.Tensor D x H x W) D = depth, the bird's eye view
+                raster to populate
+        """
+        # assert len(lidar.shape) == 2 and (lidar.shape[1] == 4 or lidar.shape[1] == 5) and lidar.shape[0] > 0
+        # TODO (Quin) allow timestamps to be consumed by single lidar voxelization
+        # assert not self.add_ground or (self.add_ground and lidar.shape[1] == 5)
+        # 1 & 2. Convert points to tensor index location. Clamp z indices to
+        # valid range.
+        # indices_h = torch.floor((self.y_max - lidar[:, 1]) / self.step).long()
+        indices_h = torch.floor((lidar[:, 1] - self.y_min) / self.step).long()
+        indices_w = torch.floor((lidar[:, 0] - self.x_min) / self.step).long()
+        indices_d = torch.clamp(
+            torch.floor((lidar[:, 2] - self.z_min) / self.z_step),
+            0,
+            self.z_depth - 1,
+        ).long()
+        # 3. Remove points out of bound
+        valid_mask = ~torch.any(
+            torch.stack(
+                [
+                    indices_h < 0,
+                    indices_h >= self.height,
+                    indices_w < 0,
+                    indices_w >= self.width,
+                ]
+            ),
+            dim=0,
+        )
+        indices_h = indices_h[valid_mask]
+        indices_w = indices_w[valid_mask]
+        indices_d = indices_d[valid_mask]
+        # 4. Assign indices to 1
+        bev[indices_d, indices_h, indices_w] = 1.0
+
+    def forward(self, lidars: List[List[torch.Tensor]]):
+        """Voxelize multiple sweeps in the current vehicle frame into voxels
+            in image frame
+        Args:
+            list(list(tensor)): B * T * tensor[N x 4],
+                where B = batch_size, T = 5, N is variable,
+                4 = [x, y, z, intensity]
+        Returns:
+            tensor: [B x D x H x W], B = batch_size, D = T * depth, H = height,
+                W = width
+        """
+        batch_size = len(lidars)
+        assert batch_size > 0 and len(lidars[0]) > 0
+        num_sweep = len(lidars[0])
+
+        bev = torch.zeros(
+            (batch_size, num_sweep, self.depth, self.height, self.width),
+            dtype=torch.float,
+            device=lidars[0][0][0].device,
+        )
+
+        for b in range(batch_size):
+            assert len(lidars[b]) == num_sweep
+            for i in range(num_sweep):
+                self.voxelize_single(lidars[b][i], bev[b][i])
+        return bev.view(batch_size, num_sweep * self.depth, self.height, self.width)
 
 
 @DETECTORS.register_module()
@@ -33,6 +133,9 @@ class CenterPoint(MVXTwoStageDetector):
                              pts_bbox_head, img_roi_head, img_rpn_head,
                              train_cfg, test_cfg, pretrained, init_cfg)
 
+        self.voxelizer = Voxelizer(x_min=pts_voxel_layer['point_cloud_range'][0], y_min=pts_voxel_layer['point_cloud_range'][1], z_min=-2, x_max=pts_voxel_layer['point_cloud_range'][3], y_max=pts_voxel_layer['point_cloud_range'][4], z_max=4, step=pts_voxel_layer['voxel_size'][0], z_step=0.15)
+
+
     @property
     def with_velocity(self):
         """bool: Whether the head predicts velocity"""
@@ -43,11 +146,15 @@ class CenterPoint(MVXTwoStageDetector):
         """Extract features of points."""
         if not self.with_pts_bbox:
             return None
-        voxels, num_points, coors = self.voxelize(pts)
+        for p in pts:
+            p[:, 2] += z_offset
 
-        voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
-        batch_size = coors[-1, 0] + 1
-        x = self.pts_middle_encoder(voxel_features, coors, batch_size)
+        # voxels, num_points, coors = self.voxelize(pts)
+
+        # voxel_features = self.pts_voxel_encoder(voxels, num_points, coors)
+        # batch_size = coors[-1, 0] + 1
+        # x = self.pts_middle_encoder(voxel_features, coors, batch_size)
+        x = self.voxelizer([[_] for _ in pts])
         x = self.pts_backbone(x)
         if self.with_pts_neck:
             x = self.pts_neck(x)
@@ -75,6 +182,9 @@ class CenterPoint(MVXTwoStageDetector):
             dict: Losses of each branch.
         """
         outs = self.pts_bbox_head(pts_feats)
+        for box in gt_bboxes_3d:
+            box.tensor[:, 2] += z_offset
+
         loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
         losses = self.pts_bbox_head.loss(*loss_inputs)
         return losses
@@ -84,6 +194,8 @@ class CenterPoint(MVXTwoStageDetector):
         outs = self.pts_bbox_head(x)
         bbox_list = self.pts_bbox_head.get_bboxes(
             outs, img_metas, rescale=rescale)
+        for i in range(len(bbox_list)):
+            bbox_list[i][0].tensor[:, 2] -= z_offset
         bbox_results = [
             bbox3d2result(bboxes, scores, labels)
             for bboxes, scores, labels in bbox_list

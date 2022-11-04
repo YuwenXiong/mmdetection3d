@@ -413,6 +413,7 @@ class LoadPointsFromFile(object):
             elif pts_filename.endswith('.npy'):
                 points = np.load(BytesIO(pts_bytes), allow_pickle=True).item()
                 points = points['xyz']
+                # points = np.hstack((points['xyz'], points['laser_id'][:, None]))
                 return points
             else:
                 points = np.frombuffer(pts_bytes, dtype=np.float32)
@@ -456,9 +457,12 @@ class LoadPointsFromFile(object):
 
         if 'sdv_pose' in results:
             import pandaset as ps
-            points_rfu = ps.geometry.lidar_points_to_ego(points, results['sdv_pose'])
+            points_rfu = ps.geometry.lidar_points_to_ego(points[:, :3], results['sdv_pose'])
             # points = points_rfu
-            points =  np.concatenate([points_rfu[:, [1]], -points_rfu[:, [0]], points_rfu[:, [2]]], axis=1)
+            if points.shape[-1] == 4:
+                points = np.concatenate([points_rfu[:, [1]], -points_rfu[:, [0]], points_rfu[:, [2]], points[:, [3]]], axis=1)
+            else:
+                points = np.concatenate([points_rfu[:, [1]], -points_rfu[:, [0]], points_rfu[:, [2]]], axis=1)
             # import open3d as o3d
             # pcd = o3d.geometry.PointCloud(points=o3d.utility.Vector3dVector(points))
             # o3d.visualization.draw_geometries([pcd])

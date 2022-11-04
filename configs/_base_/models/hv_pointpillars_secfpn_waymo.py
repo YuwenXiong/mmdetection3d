@@ -3,12 +3,12 @@
 # Usually voxel size is changed consistently with the point cloud range
 # If point cloud range is modified, do remember to change all related
 # keys in the config.
-voxel_size = [0.32, 0.32, 6]
+voxel_size = [0.3125, 0.3125, 6]
 model = dict(
     type='VoxelNet',
     voxel_layer=dict(
         max_num_points=32,  # max_points_per_voxel
-        point_cloud_range=[-74.88, -74.88, -2, 74.88, 74.88, 4],
+        point_cloud_range=[-75, -75, -2, 75, 75, 4],
         voxel_size=voxel_size,
         max_voxels=(16000, 40000)  # (training, testing) max_voxels
     ),
@@ -18,9 +18,9 @@ model = dict(
         feat_channels=[64],
         with_distance=False,
         voxel_size=voxel_size,
-        point_cloud_range=[-74.88, -74.88, -2, 74.88, 74.88, 4]),
+        point_cloud_range=[-75, -75, -2, 75, 75, 4]),
     middle_encoder=dict(
-        type='PointPillarsScatter', in_channels=64, output_shape=[468, 468]),
+        type='PointPillarsScatter', in_channels=64, output_shape=[480, 480]),
     backbone=dict(
         type='SECOND',
         in_channels=40,
