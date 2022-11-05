@@ -1,4 +1,4 @@
-voxel_size = [0.3125, 0.3125, 6]
+voxel_size = [0.15625, 0.15625, 6]
 model = dict(
     type="CenterPoint",
     pts_voxel_layer=dict(max_num_points=20, voxel_size=voxel_size, max_voxels=(30000, 40000)),
@@ -60,7 +60,7 @@ model = dict(
     # model training and testing settings
     train_cfg=dict(
         pts=dict(
-            grid_size=[480, 480, 1],
+            grid_size=[960, 960, 1],
             voxel_size=voxel_size,
             out_size_factor=4,
             dense_reg=1,
