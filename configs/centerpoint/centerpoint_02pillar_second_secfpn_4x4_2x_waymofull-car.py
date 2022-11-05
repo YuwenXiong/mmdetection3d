@@ -27,7 +27,7 @@ model = dict(
 
 
 optimizer = dict(lr=0.001 / 2)
-evaluation = dict(interval=2)
-checkpoint_config = dict(interval=2)
+evaluation = dict(interval=24)
+checkpoint_config = dict(interval=1)
 find_unused_parameters = True
 # work_dir = "work_dirs/centerpoint-pandaset-3d-car-real-aug"
