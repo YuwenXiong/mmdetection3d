@@ -2,7 +2,7 @@
 # D5 in the config name means the whole dataset is divided into 5 folds
 # We only use one fold for efficient experiments
 dataset_type = "PandasetDataset"
-data_root = "s3://waabi-sim-assets/waymo_pnpmix_beam512_1023/"
+data_root = "s3://waabi-sim-assets/waymo_pnpmix_beam512_1102/"
 # data_root = "/mnt/remote/shared_data/datasets/waymo/pandaset_format/"
 # data_root = '/mnt/data/waymo_dataset/kitti_format/'
 # data_root = '/mnt/data/waymo_dataset/kitti_format/'
